@@ -7,6 +7,8 @@ import { commands as politicaCommands } from "./commands/politica.js";
 import { commands as saudeCommands } from "./commands/saude.js";
 import { commands as bolsaCommands } from "./commands/bolsa.js";
 import { commands as empresaCommands } from "./commands/empresa.js";
+import { commands as adminCommands } from "./commands/admin.js";
+import { commands as ajudaCommands } from "./commands/ajuda.js";
 
 const allCommands = [
   ...economiaCommands,
@@ -17,6 +19,8 @@ const allCommands = [
   ...saudeCommands,
   ...bolsaCommands,
   ...empresaCommands,
+  ...adminCommands,
+  ...ajudaCommands,
 ].map(c => c.data.toJSON());
 
 function extractAppIdFromToken(token: string): string {

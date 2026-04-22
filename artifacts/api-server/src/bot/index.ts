@@ -7,6 +7,8 @@ import { commands as politicaCommands } from "./commands/politica.js";
 import { commands as saudeCommands } from "./commands/saude.js";
 import { commands as bolsaCommands } from "./commands/bolsa.js";
 import { commands as empresaCommands } from "./commands/empresa.js";
+import { commands as adminCommands } from "./commands/admin.js";
+import { commands as ajudaCommands } from "./commands/ajuda.js";
 import { deployCommands } from "./deploy-commands.js";
 import { startWorldEngine } from "./systems/worldEvents.js";
 import { seedDatabase } from "./systems/seed.js";
@@ -26,6 +28,8 @@ const allCommands: BotCommand[] = [
   ...saudeCommands,
   ...bolsaCommands,
   ...empresaCommands,
+  ...adminCommands,
+  ...ajudaCommands,
 ];
 
 export async function startBot() {
