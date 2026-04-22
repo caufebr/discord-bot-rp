@@ -49,13 +49,13 @@ export async function startBot() {
     commandMap.set(cmd.data.name, cmd);
   }
 
-  client.once("ready", (c) => {
+  client.once("clientReady", (c) => {
     logger.info(`🤖 Bot online: ${c.user.tag}`);
     if (eventChannelId) {
       startWorldEngine(client, eventChannelId);
       logger.info("🌍 World engine started.");
     } else {
-      logger.warn("DISCORD_EVENT_CHANNEL_ID not set — world events disabled.");
+      logger.warn("DISCORD_EVENT_CHANNEL_ID não configurado — eventos globais desativados. Defina DISCORD_EVENT_CHANNEL_ID com o ID de um canal de texto.");
     }
   });
 
