@@ -11,8 +11,6 @@
   },
   "include": [
     "index.ts",
-    "index.mts",
-    "src/**/*",
     "commands/**/*",
     "events/**/*"
   ]
