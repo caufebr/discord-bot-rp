@@ -1,10 +1,13 @@
 providers = ["node"]
 
 [phases.setup]
-nixPkgs = ["nodejs_20", "pnpm-9_x", "openssl"]
+nixPkgs = ["nodejs_20", "openssl"]
 
 [phases.install]
-cmds = ["corepack enable", "pnpm install --no-frozen-lockfile"]
+cmds = [
+  "npm install -g pnpm@9.15.0",
+  "pnpm install --no-frozen-lockfile"
+]
 
 [phases.build]
 cmds = ["pnpm run build"]
