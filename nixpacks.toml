@@ -1,13 +1,13 @@
 providers = ["node"]
 
 [phases.setup]
-nixPkgs = ["nodejs_20", "openssl"]
+nixPkgs = ["nodejs_20", "pnpm-9_x", "openssl"]
 
 [phases.install]
-cmds = ["npm install -g pnpm@9.15.0 && pnpm install --no-frozen-lockfile"]
+cmds = ["pnpm install --no-frozen-lockfile"]
 
 [phases.build]
-cmds = ["export PATH=\"$(npm bin -g):$PATH\" && pnpm run build"]
+cmds = ["pnpm run build"]
 
 [start]
-cmd = "export PATH=\"$(npm bin -g):$PATH\" && pnpm run start"
+cmd = "pnpm run start"
