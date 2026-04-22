@@ -57,6 +57,36 @@ export const commands = [
           { name: "/prender", value: "**Policial certificado:** prender um suspeito por 1–120 minutos. (Não há comando para libertar nem gerenciar a cadeia.)" },
         );
 
+      const fazenda = new EmbedBuilder()
+        .setTitle("🌾 Fazenda & Loja")
+        .setColor(0x88cc44)
+        .addFields(
+          { name: "/loja ver | comprar | inventario", value: "Compre sementes, fertilizante, água, bandagem e café." },
+          { name: "/plantar semente:<nome>", value: "Planta uma semente do seu inventário (até 6 plantações ativas). Use fertilizante para acelerar 30%." },
+          { name: "/plantacao", value: "Veja o estado das suas plantações." },
+          { name: "/colher", value: "Colhe e vende automaticamente todas as plantações prontas." },
+        );
+
+      const recompensas = new EmbedBuilder()
+        .setTitle("🎁 Recompensas")
+        .setColor(0xff66cc)
+        .addFields(
+          { name: "/daily", value: "Recompensa diária — R$ 1.000 + R$ 250 por dia de streak (até 14 dias)." },
+          { name: "/weekly", value: "Recompensa semanal — R$ 12.000." },
+          { name: "/bonus", value: "Bônus aleatório (R$ 500–2.000) a cada 4h." },
+        );
+
+      const cassino = new EmbedBuilder()
+        .setTitle("🎰 Cassino")
+        .setColor(0xaa00ff)
+        .addFields(
+          { name: "/cassino slot", value: "Caça-níquel — combine 3 símbolos (até 25x)." },
+          { name: "/cassino roleta", value: "Roleta — vermelho/preto (2x) ou verde (14x)." },
+          { name: "/cassino dado", value: "Dados — alto/baixo (2x) ou número exato (5x)." },
+          { name: "/cassino bicho", value: "Jogo do bicho — escolha 1-25 (paga 18x)." },
+        )
+        .setFooter({ text: `Aposta mínima R$ 50 · máxima R$ 100.000` });
+
       const sociedade = new EmbedBuilder()
         .setTitle("🏛️ Sociedade")
         .setColor(0xffaa00)
@@ -79,7 +109,7 @@ export const commands = [
         .setFooter({ text: "Apenas administradores do servidor podem usar /adm." });
 
       await interaction.reply({
-        embeds: [intro, economia, profissao, crime, sociedade, admin],
+        embeds: [intro, economia, recompensas, fazenda, profissao, crime, cassino, sociedade, admin],
         ephemeral: true,
       });
     },

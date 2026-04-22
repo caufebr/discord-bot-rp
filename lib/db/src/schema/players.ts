@@ -30,6 +30,11 @@ export const players = pgTable("players", {
   insurance: boolean("insurance").notNull().default(false),
   insuranceEnd: timestamp("insurance_end"),
   lastSalary: timestamp("last_salary"),
+  inventory: jsonb("inventory").notNull().default({}).$type<Record<string, number>>(),
+  lastDaily: timestamp("last_daily"),
+  lastWeekly: timestamp("last_weekly"),
+  lastBonus: timestamp("last_bonus"),
+  dailyStreak: integer("daily_streak").notNull().default(0),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
