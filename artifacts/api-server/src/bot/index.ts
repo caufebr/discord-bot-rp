@@ -1,54 +1,12 @@
-import { Client, GatewayIntentBits, Collection, type ChatInputCommandInteraction } from "discord.js";
-import { commands as economiaCommands } from "./commands/economia.js";
-import { commands as profissaoCommands } from "./commands/profissao.js";
-import { commands as crimeCommands } from "./commands/crime.js";
-import { commands as ganguesCommands } from "./commands/gangues.js";
-import { commands as politicaCommands } from "./commands/politica.js";
-import { commands as saudeCommands } from "./commands/saude.js";
-import { commands as bolsaCommands } from "./commands/bolsa.js";
-import { commands as empresaCommands } from "./commands/empresa.js";
-import { commands as adminCommands } from "./commands/admin.js";
-import { commands as ajudaCommands } from "./commands/ajuda.js";
-import { commands as lojaCommands } from "./commands/loja.js";
-import { commands as plantacaoCommands } from "./commands/plantacao.js";
-import { commands as recompensasCommands } from "./commands/recompensas.js";
-import { commands as cassinoCommands } from "./commands/cassino.js";
-import { commands as rgCommands } from "./commands/rg.js";
-import { commands as armasCommands } from "./commands/armas.js";
-import { commands as petCommands } from "./commands/pet.js";
-import { commands as familiaCommands } from "./commands/familia.js";
-import { commands as fugirCommands } from "./commands/fugir.js";
-import { deployCommands } from "./deploy-commands.js";
+import { Client, GatewayIntentBits, Partials } from "discord.js";
+import { handleMessage } from "./messages.js";
 import { startWorldEngine } from "./systems/worldEvents.js";
+import { startRadio } from "./systems/radio.js";
+import { ensureSeason, startSeasonChecker } from "./systems/seasons.js";
 import { seedDatabase } from "./systems/seed.js";
 import { logger } from "../lib/logger.js";
 
-interface BotCommand {
-  data: { name: string; toJSON(): object };
-  execute(interaction: ChatInputCommandInteraction): Promise<unknown>;
-}
-
-const allCommands: BotCommand[] = [
-  ...economiaCommands,
-  ...profissaoCommands,
-  ...crimeCommands,
-  ...ganguesCommands,
-  ...politicaCommands,
-  ...saudeCommands,
-  ...bolsaCommands,
-  ...empresaCommands,
-  ...adminCommands,
-  ...ajudaCommands,
-  ...lojaCommands,
-  ...plantacaoCommands,
-  ...recompensasCommands,
-  ...cassinoCommands,
-  ...rgCommands,
-  ...armasCommands,
-  ...petCommands,
-  ...familiaCommands,
-  ...fugirCommands,
-];
+const RADIO_CHANNEL_ID = "1496352320194220113";
 
 export async function startBot() {
   const token = process.env.DISCORD_TOKEN;
@@ -59,49 +17,42 @@ export async function startBot() {
     return;
   }
 
-  await deployCommands();
   await seedDatabase();
+  await ensureSeason();
 
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent, // PRIVILEGED — habilite no Discord Developer Portal
+    ],
+    partials: [Partials.Channel, Partials.Message],
   });
-
-  const commandMap = new Collection<string, BotCommand>();
-  for (const cmd of allCommands) {
-    commandMap.set(cmd.data.name, cmd);
-  }
 
   client.once("clientReady", (c) => {
-    logger.info(`🤖 Bot online: ${c.user.tag}`);
+    logger.info(`🤖 Bot online: ${c.user.tag} (prefixo: !)`);
     if (eventChannelId) {
       startWorldEngine(client, eventChannelId);
-      logger.info("🌍 World engine started.");
+      logger.info("🌍 World engine iniciado.");
     } else {
-      logger.warn("DISCORD_EVENT_CHANNEL_ID não configurado — eventos globais desativados. Defina DISCORD_EVENT_CHANNEL_ID com o ID de um canal de texto.");
+      logger.warn("DISCORD_EVENT_CHANNEL_ID não configurado — eventos globais desativados.");
     }
+    startRadio(client, RADIO_CHANNEL_ID);
+    logger.info(`📻 Rádio iniciada (canal ${RADIO_CHANNEL_ID}).`);
+    startSeasonChecker(client, eventChannelId || RADIO_CHANNEL_ID);
+    logger.info("🔄 Verificador de temporadas iniciado.");
   });
 
-  client.on("interactionCreate", async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-
-    const command = commandMap.get(interaction.commandName);
-    if (!command) return;
-
+  client.on("messageCreate", async (msg) => {
     try {
-      await command.execute(interaction);
+      await handleMessage(msg);
     } catch (err) {
-      logger.error({ err, command: interaction.commandName }, "Error executing command");
-      const reply = { content: "❌ Ocorreu um erro ao executar este comando.", ephemeral: true };
-      if (interaction.replied || interaction.deferred) {
-        await interaction.followUp(reply).catch(() => {});
-      } else {
-        await interaction.reply(reply).catch(() => {});
-      }
+      logger.error({ err }, "messageCreate handler error");
     }
   });
 
   client.on("error", (err) => logger.error({ err }, "Discord client error"));
-  client.on("warn", (msg) => logger.warn(msg));
+  client.on("warn", (m) => logger.warn(m));
 
   const reconnect = async (attempt = 1) => {
     try {

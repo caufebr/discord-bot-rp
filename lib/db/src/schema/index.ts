@@ -5,3 +5,4 @@ export * from "./politics";
 export * from "./stockmarket";
 export * from "./farming";
 export * from "./extra";
+export * from "./extended";
