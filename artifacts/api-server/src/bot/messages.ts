@@ -34,6 +34,16 @@ import { TICKET_PRICE, NUMBER_RANGE, getCurrentDraw, buyTicket } from "./systems
 import { MORAL_SCENARIOS, pickRandomScenario } from "./systems/morality.js";
 import { BLACK_MARKET, MIN_RECORD_TO_ACCESS } from "./systems/blackmarket.js";
 import { EVENT_DEFS, type EventType, getActiveEvent, startEvent } from "./systems/economicEvents.js";
+import {
+  BRANCHES,
+  BRANCH_KEYS,
+  FACTORY_BUILD_COST,
+  FACTORY_UPGRADE_BASE,
+  MAX_FACTORY_LEVEL,
+  getBranch,
+  findProduct,
+  findMaterial,
+} from "./systems/companyBranches.js";
 import { logger } from "../lib/logger.js";
 
 const PREFIX = "!";
@@ -834,8 +844,10 @@ reg(["gcriar"], async (msg, args) => {
   const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
   if (p.gangId) return reply(msg, "❌ Já está em uma gangue.");
   if (p.balance < 5000) return reply(msg, "❌ Custa R$ 5.000.");
-  const exists = await db.query.gangs.findFirst({ where: eq(schema.gangs.name, nome) });
-  if (exists) return reply(msg, "❌ Nome já existe.");
+  const existsName = await db.query.gangs.findFirst({ where: sql`lower(${schema.gangs.name}) = lower(${nome})` });
+  if (existsName) return reply(msg, `❌ Nome **${nome}** indisponível — já existe uma facção com esse nome. Escolha outro.`);
+  const existsTag = await db.query.gangs.findFirst({ where: sql`lower(${schema.gangs.tag}) = lower(${tag})` });
+  if (existsTag) return reply(msg, `❌ Tag **[${tag}]** indisponível — já está em uso. Escolha outra.`);
   await removeMoney(p.discordId, 5000);
   const id = `g_${Date.now()}`;
   await db.insert(schema.gangs).values({ id, name: nome, tag, leaderId: p.discordId });
@@ -1934,18 +1946,22 @@ const COMPANY_CREATE_COST = 20000;
 const IPO_COST = 50000;
 const ADVERTISE_COST = 2000;
 const EMPLOYEE_SALARY = 1500;
-const EMPRESA_SETORES = ["Tecnologia", "Saúde", "Alimentação", "Transporte", "Segurança", "Entretenimento", "Construção", "Finanças"];
 
 function isEmpresario(p: any): boolean {
   return p.profession === "empresario" && p.isCertified === true;
 }
+
+function getInv(p: any): any { return { ...(p.inventory ?? {}) }; }
+function getMaterias(p: any): Record<string, number> { return { ...((p.inventory?._materias as Record<string, number>) ?? {}) }; }
+function getEstoque(p: any): Record<string, number> { return { ...((p.inventory?._estoque as Record<string, number>) ?? {}) }; }
+function getFabrica(p: any): { nivel: number; ramo: string } | null { return (p.inventory?._fabrica as any) ?? null; }
 
 reg(["empresa", "minhaempresa"], async (msg) => {
   const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
   const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
   if (!c) {
     if (!isEmpresario(p)) return reply(msg, "❌ Apenas formados em **Empresário** podem ter empresa. Use `!curso empresario` e `!treinar`.");
-    return reply(msg, `🏢 Você ainda não tem empresa. Use \`!ecriar <nome> <setor> <descrição>\`.\nSetores: ${EMPRESA_SETORES.join(", ")}\nCusto: ${formatMoney(COMPANY_CREATE_COST)}`);
+    return reply(msg, `🏢 Você ainda não tem empresa. Use \`!ecriar "<nome>" <ramo>\`.\nVeja os ramos disponíveis com \`!ramos\`.\nCusto: ${formatMoney(COMPANY_CREATE_COST)}`);
   }
   const employees = (c.employees as string[]) ?? [];
   const lucro = c.revenue - c.expenses;
@@ -1967,24 +1983,54 @@ reg(["empresa", "minhaempresa"], async (msg) => {
 reg(["ecriar"], async (msg, args) => {
   const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
   if (!isEmpresario(p)) return reply(msg, "❌ Apenas formados em **Empresário** certificados podem criar empresa. Use `!curso empresario` e `!treinar`.");
-  const nome = args[0];
-  const setor = args[1];
-  const descricao = args.slice(2).join(" ") || "Sem descrição";
-  if (!nome || !setor) return reply(msg, `❌ Uso: \`!ecriar "<nome>" <setor> <descrição>\`\nSetores: ${EMPRESA_SETORES.join(", ")}`);
-  if (!EMPRESA_SETORES.includes(setor)) return reply(msg, `❌ Setor inválido. Opções: ${EMPRESA_SETORES.join(", ")}`);
+
+  // Aceita: !ecriar "<nome com espaços>" <ramo> [descrição]
+  const raw = msg.content.replace(/^!\S+\s*/, "");
+  const quoted = raw.match(/^"([^"]+)"\s+(\S+)(?:\s+(.*))?$/);
+  let nome: string | undefined;
+  let ramoKey: string | undefined;
+  let descricao = "Sem descrição";
+  if (quoted) {
+    nome = quoted[1];
+    ramoKey = quoted[2]?.toLowerCase();
+    if (quoted[3]) descricao = quoted[3];
+  } else {
+    nome = args[0];
+    ramoKey = args[1]?.toLowerCase();
+    if (args.length > 2) descricao = args.slice(2).join(" ");
+  }
+
+  if (!nome || !ramoKey) {
+    return reply(msg, `❌ Uso: \`!ecriar "<nome>" <ramo> [descrição]\`\nRamos: ${BRANCH_KEYS.join(", ")}\nVeja detalhes em \`!ramos\`.`);
+  }
+  const ramo = getBranch(ramoKey);
+  if (!ramo) return reply(msg, `❌ Ramo inválido. Opções: ${BRANCH_KEYS.join(", ")}\nUse \`!ramos\` para ver detalhes.`);
+
   const owned = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
   if (owned) return reply(msg, "❌ Você já tem uma empresa.");
-  const exists = await db.query.companies.findFirst({ where: eq(schema.companies.name, nome) });
-  if (exists) return reply(msg, "❌ Esse nome já existe.");
+  const exists = await db.query.companies.findFirst({ where: sql`lower(${schema.companies.name}) = lower(${nome})` });
+  if (exists) return reply(msg, `❌ Nome **${nome}** indisponível — já existe uma empresa com esse nome. Escolha outro.`);
   if (p.balance < COMPANY_CREATE_COST) return reply(msg, `❌ Custa ${formatMoney(COMPANY_CREATE_COST)}.`);
+
   await removeMoney(p.discordId, COMPANY_CREATE_COST);
   const id = `co_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
   await db.insert(schema.companies).values({
-    id, name: nome, ownerId: p.discordId, sector: setor, description: descricao,
+    id, name: nome, ownerId: p.discordId, sector: ramo.name, description: descricao,
     employees: [], revenue: 0, expenses: COMPANY_CREATE_COST, totalShares: 1000, availableShares: 1000,
     sharePrice: 100, marketCap: 100000, isPublic: false, level: 1, reputation: 50, priceHistory: [],
   });
-  return reply(msg, `🏢 Empresa **${nome}** criada no setor **${setor}**!\nPróximos: \`!econtratar @user\` · \`!eanunciar\` · \`!eexpandir\` · \`!eipo\` (a partir do nv 3)`);
+
+  // Marca o ramo na inventory para uso pela cadeia produtiva
+  const inv = getInv(p);
+  inv._fabrica = inv._fabrica ?? { nivel: 0, ramo: ramo.key };
+  inv._fabrica.ramo = ramo.key;
+  await updatePlayer(p.discordId, { inventory: inv });
+
+  return reply(msg,
+    `🏢 Empresa **${nome}** criada no ramo ${ramo.emoji} **${ramo.name}**!\n` +
+    `Cadeia produtiva: \`!ematerias\` (comprar matéria-prima) → \`!econstruir\` (montar fábrica, ${formatMoney(FACTORY_BUILD_COST)}) → \`!efabricar\` → \`!eproduto add\` → vender com \`!ecomprar\`.\n` +
+    `Veja produtos do seu ramo em \`!ramos ${ramo.key}\`.`
+  );
 });
 
 reg(["econtratar", "contratar"], async (msg, args) => {
@@ -2176,7 +2222,7 @@ reg(["impeachment", "impeach"], async (msg, args) => {
         .setColor(0xaa0000)
         .setDescription(
           `<@${msg.author.id}> abriu impeachment contra <@${officerId}> (**${target}**).\n` +
-          `Reaja ✅ em **90 segundos** — precisamos de **5 apoiadores** (sem contar o autor).\n\n` +
+          `Reaja ✅ em **3 minutos** — precisamos de **30 apoiadores** (sem contar o autor).\n\n` +
           `Se aprovado, o orçamento político restante é confiscado e dividido entre os apoiadores.`
         )
         .setImage(GIFS.vote),
@@ -2188,7 +2234,7 @@ reg(["impeachment", "impeach"], async (msg, args) => {
   try {
     await sent.awaitReactions({
       filter: (r: any, u: any) => r.emoji.name === "✅" && !u.bot,
-      time: 90_000,
+      time: 180_000,
     });
   } catch {}
 
@@ -2202,8 +2248,8 @@ reg(["impeachment", "impeach"], async (msg, args) => {
       : [];
   }
 
-  if (supporters.length < 5) {
-    return msg.channel.send(`❌ Impeachment falhou: ${supporters.length}/5 apoiadores.`).catch(() => {});
+  if (supporters.length < 30) {
+    return msg.channel.send(`❌ Impeachment falhou: ${supporters.length}/30 apoiadores.`).catch(() => {});
   }
 
   // Remove from government
@@ -2240,7 +2286,7 @@ reg(["impeachment", "impeach"], async (msg, args) => {
 });
 
 // ============ PRODUTOS DA EMPRESA ============
-type Produto = { id: number; nome: string; preco: number; custo: number; vendidos: number };
+type Produto = { id: number; nome: string; preco: number; custo: number; vendidos: number; prodKey?: string };
 
 reg(["eproduto", "produto", "produtos"], async (msg, args) => {
   const sub = (args[0] ?? "").toLowerCase();
@@ -2249,7 +2295,33 @@ reg(["eproduto", "produto", "produtos"], async (msg, args) => {
   if (sub === "add" || sub === "criar" || sub === "novo") {
     const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
     if (!c) return reply(msg, "❌ Você não tem empresa.");
-    // Aceita: !eproduto add "<nome com espaço>" <preco> <custo>
+
+    // Modo 1 — fabricado: !eproduto add fab <prodKey> <preço>
+    if ((args[1] ?? "").toLowerCase() === "fab" || (args[1] ?? "").toLowerCase() === "fabricado") {
+      const prodKey = args[2]?.toLowerCase();
+      const preco = intArg(args, 3);
+      const found = prodKey ? findProduct(prodKey) : null;
+      if (!found || !preco) {
+        return reply(msg, '❌ Uso: `!eproduto add fab <prodKey> <preço>`\nVeja `!ramos` para os prodKeys.');
+      }
+      const fab = getFabrica(p);
+      if (!fab || fab.ramo !== found.branch.key) {
+        return reply(msg, `❌ Esse produto pertence ao ramo **${found.branch.name}**, mas sua empresa é de outro ramo.`);
+      }
+      const inv: any = { ...(p.inventory ?? {}) };
+      const list: Produto[] = (inv._produtos as Produto[]) ?? [];
+      if (list.length >= 5) return reply(msg, "❌ Limite de 5 produtos por empresa.");
+      if (list.some(x => x.prodKey === prodKey)) return reply(msg, "❌ Esse produto já está cadastrado.");
+      const custo = found.product.laborCost;
+      if (custo >= preco) return reply(msg, `❌ O preço precisa ser maior que o custo de produção (${formatMoney(custo)}).`);
+      const id = (list.reduce((m, x) => Math.max(m, x.id), 0) || 0) + 1;
+      list.push({ id, nome: `${found.product.emoji} ${found.product.name}`, preco, custo, vendidos: 0, prodKey: found.product.key });
+      inv._produtos = list;
+      await updatePlayer(p.discordId, { inventory: inv });
+      return reply(msg, `✅ Produto fabricado \`${id}\` **${found.product.name}** cadastrado na loja por ${formatMoney(preco)} (custo ${formatMoney(custo)}). Fabrique unidades com \`!efabricar ${prodKey} <qtd>\`.`);
+    }
+
+    // Modo 2 — livre (legado): !eproduto add "<nome>" <preço> <custo>
     let nome = args[1];
     let preco = intArg(args, 2);
     let custo = intArg(args, 3);
@@ -2261,7 +2333,7 @@ reg(["eproduto", "produto", "produtos"], async (msg, args) => {
       custo = parseInt(m[3], 10);
     }
     if (!nome || !preco || custo === null || custo === undefined) {
-      return reply(msg, '❌ Uso: `!eproduto add "<nome>" <preço> <custo>`');
+      return reply(msg, '❌ Uso:\n• `!eproduto add fab <prodKey> <preço>` (fabricado, entrega item útil)\n• `!eproduto add "<nome>" <preço> <custo>` (livre, sem utilidade)');
     }
     if (custo >= preco) return reply(msg, "❌ O custo precisa ser menor que o preço.");
     const inv: any = { ...(p.inventory ?? {}) };
@@ -2321,6 +2393,19 @@ reg(["ecomprar", "comprarprod"], async (msg, args) => {
   const total = prod.preco * qtd;
   if (buyer.balance < total) return reply(msg, `❌ Faltam ${formatMoney(total - buyer.balance)}.`);
 
+  // Se for produto fabricado, precisa ter estoque na fábrica do dono
+  let prodDef: ReturnType<typeof findProduct> = null;
+  if (prod.prodKey) {
+    prodDef = findProduct(prod.prodKey);
+    const estoque = (oinv._estoque as Record<string, number>) ?? {};
+    const disponivel = estoque[prod.prodKey] ?? 0;
+    if (disponivel < qtd) {
+      return reply(msg, `❌ **${prod.nome}** está esgotado. Disponível: ${disponivel}. Peça ao dono para fabricar mais com \`!efabricar ${prod.prodKey}\`.`);
+    }
+    estoque[prod.prodKey] = disponivel - qtd;
+    oinv._estoque = estoque;
+  }
+
   const employees: string[] = (c.employees as string[]) ?? [];
   const now = Date.now();
   const dia = 24 * 60 * 60 * 1000;
@@ -2359,6 +2444,15 @@ reg(["ecomprar", "comprarprod"], async (msg, args) => {
     expenses: c.expenses + (prod.custo * qtd) + tax,
   }).where(eq(schema.companies.id, c.id));
 
+  // Entrega o item útil ao comprador (se for produto fabricado)
+  let entregaTxt = "";
+  if (prodDef) {
+    const binv: any = { ...(buyer.inventory ?? {}) };
+    binv[prodDef.product.key] = (binv[prodDef.product.key] ?? 0) + qtd;
+    await updatePlayer(buyer.discordId, { inventory: binv });
+    entregaTxt = `\n🎁 Recebeu ${qtd}× **${prodDef.product.name}** no inventário. Use com \`!usar ${prodDef.product.key}\`.`;
+  }
+
   await logTransaction(buyer.discordId, tid, total, "purchase", `${qtd}× ${prod.nome} (${c.name})`);
 
   const breakdown =
@@ -2366,7 +2460,8 @@ reg(["ecomprar", "comprarprod"], async (msg, args) => {
     `→ 🏢 Dono: ${formatMoney(ownerNet)}\n` +
     `→ 🧾 Imposto: ${formatMoney(tax)}\n` +
     `→ 👷 ${activeWorkers.length} func. ativo(s): ${formatMoney(workerPool)}` +
-    (activeWorkers.length === 0 ? " _(ninguém bateu ponto)_" : "");
+    (activeWorkers.length === 0 ? " _(ninguém bateu ponto)_" : "") +
+    entregaTxt;
   return reply(msg, breakdown);
 });
 
@@ -2436,6 +2531,254 @@ reg(["top", "ranking"], async (msg) => {
   return reply(msg, "🏆 **Top 10 mais ricos**\n" + top.map((p, i) => `${i + 1}. ${p.username} — ${formatMoney(p.balance + p.bankBalance)}`).join("\n"));
 });
 
+// ============ CADEIA PRODUTIVA — RAMOS / MATÉRIA-PRIMA / FÁBRICA ============
+
+reg(["ramos", "ramo"], async (msg, args) => {
+  const key = args[0]?.toLowerCase();
+  if (key) {
+    const b = getBranch(key);
+    if (!b) return reply(msg, `❌ Ramo desconhecido. Opções: ${BRANCH_KEYS.join(", ")}`);
+    const e = new EmbedBuilder()
+      .setTitle(`${b.emoji} Ramo — ${b.name}`)
+      .setColor(0x884400)
+      .setDescription(b.description)
+      .addFields(
+        {
+          name: "📦 Matérias-primas (compre com `!ematerias <key> [qtd]`)",
+          value: b.materials.map(m => `${m.emoji} \`${m.key}\` **${m.name}** — ${formatMoney(m.price)}/un`).join("\n"),
+        },
+        {
+          name: "🏭 Produtos (fabrique com `!efabricar <key> [qtd]`, depois `!eproduto add fab <key> <preço>`)",
+          value: b.products.map(p => {
+            const mat = Object.entries(p.materials).map(([k, q]) => `${q}× ${k}`).join(" + ");
+            const util = p.utility.type === "weapon" ? `🔫 arma equipável (${p.utility.weaponKey})`
+              : p.utility.type === "heal" ? `❤️ +${p.utility.amount} saúde`
+              : p.utility.type === "energy" ? `⚡ +${p.utility.amount} energia`
+              : p.utility.type === "xp" ? `✨ +${p.utility.amount} XP`
+              : `⭐ +${p.utility.amount} reputação`;
+            return `${p.emoji} \`${p.key}\` **${p.name}** _(fáb. nv ${p.factoryLevel})_\n` +
+                   `  Receita: ${mat} · mão-de-obra ${formatMoney(p.laborCost)}\n` +
+                   `  Utilidade: ${util} · sugerido ${formatMoney(p.suggestedPrice)}`;
+          }).join("\n\n"),
+        },
+      );
+    return reply(msg, { embeds: [e] });
+  }
+  const e = new EmbedBuilder()
+    .setTitle("🏭 Ramos Empresariais")
+    .setColor(0x884400)
+    .setDescription("Cada ramo tem cadeia produtiva real: **matéria-prima → fábrica → produto → utilidade no servidor**.\nEscolha um ao criar empresa: `!ecriar \"<nome>\" <ramo>`.")
+    .addFields(
+      ...Object.values(BRANCHES).map(b => ({
+        name: `${b.emoji} \`${b.key}\` — ${b.name}`,
+        value: `${b.description}\nDetalhes: \`!ramos ${b.key}\``,
+      })),
+    );
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["ematerias", "ecomprarmateria", "ematprima"], async (msg, args) => {
+  const matKey = args[0]?.toLowerCase();
+  const qtd = Math.max(1, intArg(args, 1) ?? 1);
+  if (!matKey) return reply(msg, "❌ Uso: `!ematerias <materialKey> [qtd]`\nVeja keys em `!ramos <ramo>`.");
+  const found = findMaterial(matKey);
+  if (!found) return reply(msg, "❌ Matéria-prima desconhecida. Veja `!ramos`.");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Você não tem empresa.");
+  const fab = getFabrica(p);
+  if (!fab || fab.ramo !== found.branch.key) {
+    return reply(msg, `❌ Sua empresa é do ramo **${fab ? getBranch(fab.ramo)?.name : "?"}**, mas **${found.material.name}** pertence a **${found.branch.name}**.`);
+  }
+  const total = found.material.price * qtd;
+  if (p.balance < total) return reply(msg, `❌ Custa ${formatMoney(total)}. Faltam ${formatMoney(total - p.balance)}.`);
+  await removeMoney(p.discordId, total);
+  const inv = getInv(p);
+  const mats = getMaterias(p);
+  mats[matKey] = (mats[matKey] ?? 0) + qtd;
+  inv._materias = mats;
+  await updatePlayer(p.discordId, { inventory: inv });
+  await db.update(schema.companies).set({ expenses: c.expenses + total }).where(eq(schema.companies.id, c.id));
+  return reply(msg, `📦 Comprou ${qtd}× ${found.material.emoji} **${found.material.name}** por ${formatMoney(total)}. Estoque atual: ${mats[matKey]}.`);
+});
+
+reg(["emateriais", "estoquemat"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const fab = getFabrica(p);
+  const mats = getMaterias(p);
+  if (Object.keys(mats).length === 0) return reply(msg, "📦 Sem matérias-primas. Compre com `!ematerias <key> [qtd]`.");
+  const branchInfo = fab ? getBranch(fab.ramo) : null;
+  const lines = Object.entries(mats).map(([k, q]) => {
+    const m = findMaterial(k);
+    return `${m?.material.emoji ?? "📦"} \`${k}\` **${m?.material.name ?? k}** — ${q} un`;
+  });
+  const e = new EmbedBuilder()
+    .setTitle(`📦 Matérias-primas${branchInfo ? ` — ${branchInfo.name}` : ""}`)
+    .setColor(0x886600)
+    .setDescription(lines.join("\n"));
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["efabrica"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Você não tem empresa.");
+  const fab = getFabrica(p);
+  if (!fab || fab.nivel < 1) {
+    return reply(msg, `🏭 Sua empresa **${c.name}** ainda não tem fábrica. Construa com \`!econstruir\` por ${formatMoney(FACTORY_BUILD_COST)}.`);
+  }
+  const branch = getBranch(fab.ramo);
+  const upgradeCost = FACTORY_UPGRADE_BASE * (fab.nivel + 1);
+  const e = new EmbedBuilder()
+    .setTitle(`🏭 Fábrica — ${c.name}`)
+    .setColor(0x004488)
+    .addFields(
+      { name: "Ramo", value: `${branch?.emoji ?? ""} ${branch?.name ?? fab.ramo}`, inline: true },
+      { name: "Nível", value: `${fab.nivel} / ${MAX_FACTORY_LEVEL}`, inline: true },
+      { name: "Próximo upgrade", value: fab.nivel >= MAX_FACTORY_LEVEL ? "🏆 Nível máximo" : `\`!eupgradefabrica\` — ${formatMoney(upgradeCost)}`, inline: false },
+      { name: "Produtos liberados", value: branch?.products.filter(p => p.factoryLevel <= fab.nivel).map(p => `${p.emoji} ${p.name}`).join(", ") || "_nenhum_", inline: false },
+    );
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["econstruir", "construirfabrica"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Você não tem empresa.");
+  const fab = getFabrica(p);
+  if (fab && fab.nivel >= 1) return reply(msg, `🏭 Sua fábrica já está construída (nível ${fab.nivel}). Para evoluir use \`!eupgradefabrica\`.`);
+  if (!fab) return reply(msg, "❌ Sua empresa não tem ramo definido. Recrie a empresa.");
+  if (p.balance < FACTORY_BUILD_COST) return reply(msg, `❌ Custa ${formatMoney(FACTORY_BUILD_COST)}.`);
+  await removeMoney(p.discordId, FACTORY_BUILD_COST);
+  const inv = getInv(p);
+  inv._fabrica = { nivel: 1, ramo: fab.ramo };
+  await updatePlayer(p.discordId, { inventory: inv });
+  await db.update(schema.companies).set({ expenses: c.expenses + FACTORY_BUILD_COST }).where(eq(schema.companies.id, c.id));
+  const branch = getBranch(fab.ramo);
+  return reply(msg, `🏭 Fábrica de **${branch?.name}** construída no nível 1! Já pode \`!efabricar\` os produtos básicos do ramo.`);
+});
+
+reg(["eupgradefabrica", "eupfabrica", "eupgrade"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Você não tem empresa.");
+  const fab = getFabrica(p);
+  if (!fab || fab.nivel < 1) return reply(msg, "❌ Construa a fábrica primeiro com `!econstruir`.");
+  if (fab.nivel >= MAX_FACTORY_LEVEL) return reply(msg, "🏆 Sua fábrica já está no nível máximo.");
+  const cost = FACTORY_UPGRADE_BASE * (fab.nivel + 1);
+  if (p.balance < cost) return reply(msg, `❌ Upgrade para nível ${fab.nivel + 1} custa ${formatMoney(cost)}. Faltam ${formatMoney(cost - p.balance)}.`);
+  await removeMoney(p.discordId, cost);
+  const inv = getInv(p);
+  inv._fabrica = { nivel: fab.nivel + 1, ramo: fab.ramo };
+  await updatePlayer(p.discordId, { inventory: inv });
+  await db.update(schema.companies).set({ expenses: c.expenses + cost, level: Math.max(c.level, fab.nivel + 1) }).where(eq(schema.companies.id, c.id));
+  return reply(msg, `🏗️ Fábrica subiu para nível **${fab.nivel + 1}**! Novos produtos podem estar disponíveis — veja \`!efabrica\`.`);
+});
+
+reg(["efabricar", "produzir"], async (msg, args) => {
+  const prodKey = args[0]?.toLowerCase();
+  const qtd = Math.max(1, intArg(args, 1) ?? 1);
+  if (!prodKey) return reply(msg, "❌ Uso: `!efabricar <prodKey> [qtd]`\nVeja prodKeys em `!ramos <ramo>`.");
+  const found = findProduct(prodKey);
+  if (!found) return reply(msg, "❌ Produto desconhecido.");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Você não tem empresa.");
+  const fab = getFabrica(p);
+  if (!fab || fab.nivel < 1) return reply(msg, "❌ Construa a fábrica primeiro com `!econstruir`.");
+  if (fab.ramo !== found.branch.key) return reply(msg, `❌ Esse produto é do ramo **${found.branch.name}**, sua empresa é **${getBranch(fab.ramo)?.name}**.`);
+  if (fab.nivel < found.product.factoryLevel) return reply(msg, `❌ Precisa de fábrica nível **${found.product.factoryLevel}** (você tem ${fab.nivel}). Use \`!eupgradefabrica\`.`);
+
+  const mats = getMaterias(p);
+  const faltando: string[] = [];
+  for (const [k, q] of Object.entries(found.product.materials)) {
+    const have = mats[k] ?? 0;
+    const need = q * qtd;
+    if (have < need) faltando.push(`${need - have}× ${k}`);
+  }
+  if (faltando.length) return reply(msg, `❌ Matéria-prima insuficiente. Faltam: ${faltando.join(", ")}.\nCompre com \`!ematerias\`.`);
+  const custoTotal = found.product.laborCost * qtd;
+  if (p.balance < custoTotal) return reply(msg, `❌ Mão-de-obra/operação custa ${formatMoney(custoTotal)}. Faltam ${formatMoney(custoTotal - p.balance)}.`);
+
+  for (const [k, q] of Object.entries(found.product.materials)) mats[k] = (mats[k] ?? 0) - q * qtd;
+  await removeMoney(p.discordId, custoTotal);
+  const inv = getInv(p);
+  inv._materias = mats;
+  const estoque = getEstoque(p);
+  estoque[prodKey] = (estoque[prodKey] ?? 0) + qtd;
+  inv._estoque = estoque;
+  await updatePlayer(p.discordId, { inventory: inv });
+  await db.update(schema.companies).set({ expenses: c.expenses + custoTotal }).where(eq(schema.companies.id, c.id));
+  return reply(msg, `🏭 Fabricou ${qtd}× ${found.product.emoji} **${found.product.name}** (custo de produção ${formatMoney(custoTotal)}). Estoque agora: ${estoque[prodKey]}. Cadastre na loja com \`!eproduto add fab ${prodKey} <preço>\`.`);
+});
+
+reg(["estoque", "epfabrica"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0) ?? msg.author.id;
+  const owner = await getPlayer(tid) ?? await getOrCreatePlayer(tid, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, tid) });
+  if (!c) return reply(msg, "❌ Esse usuário não tem empresa.");
+  const estoque = ((owner.inventory as any)?._estoque as Record<string, number>) ?? {};
+  const entries = Object.entries(estoque).filter(([_, q]) => q > 0);
+  if (entries.length === 0) return reply(msg, `📦 **${c.name}** não tem produtos em estoque.`);
+  const e = new EmbedBuilder()
+    .setTitle(`🏭 Estoque — ${c.name}`)
+    .setColor(0x004488)
+    .setDescription(entries.map(([k, q]) => {
+      const f = findProduct(k);
+      return `${f?.product.emoji ?? "📦"} \`${k}\` **${f?.product.name ?? k}** — ${q} un`;
+    }).join("\n"));
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["usar", "consumir"], async (msg, args) => {
+  const key = args[0]?.toLowerCase();
+  if (!key) return reply(msg, "❌ Uso: `!usar <prodKey>`\nItens fabricados que você comprou aparecem no seu inventário.");
+  const found = findProduct(key);
+  if (!found) return reply(msg, "❌ Item desconhecido.");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const inv: any = { ...(p.inventory ?? {}) };
+  const have = (inv[key] as number) ?? 0;
+  if (have <= 0) return reply(msg, `❌ Você não tem **${found.product.name}** no inventário.`);
+
+  inv[key] = have - 1;
+  let efeito = "";
+  const u = found.product.utility;
+  switch (u.type) {
+    case "weapon": {
+      if (p.weapon) {
+        return reply(msg, `❌ Você já tem **${p.weapon}** equipada. Venda primeiro com \`!arma vender\` para equipar a nova.`);
+      }
+      await updatePlayer(p.discordId, { inventory: inv, weapon: u.weaponKey });
+      efeito = `🔫 Equipou **${u.weaponKey}**.`;
+      break;
+    }
+    case "heal": {
+      const novo = Math.min(p.maxHealth, p.health + u.amount);
+      await updatePlayer(p.discordId, { inventory: inv, health: novo });
+      efeito = `❤️ +${u.amount} saúde (agora ${novo}/${p.maxHealth}).`;
+      break;
+    }
+    case "energy": {
+      const novo = Math.min(100, p.energy + u.amount);
+      await updatePlayer(p.discordId, { inventory: inv, energy: novo });
+      efeito = `⚡ +${u.amount} energia (agora ${novo}/100).`;
+      break;
+    }
+    case "xp": {
+      await updatePlayer(p.discordId, { inventory: inv });
+      try { await addXp(p.discordId, u.amount); } catch {}
+      efeito = `✨ +${u.amount} XP.`;
+      break;
+    }
+    case "rep": {
+      await updatePlayer(p.discordId, { inventory: inv, reputation: p.reputation + u.amount });
+      efeito = `⭐ +${u.amount} reputação (agora ${p.reputation + u.amount}).`;
+      break;
+    }
+  }
+  return reply(msg, `${found.product.emoji} Usou **${found.product.name}** — ${efeito}\nRestam ${inv[key]} no inventário.`);
+});
+
 reg(["ajuda", "help", "comandos"], async (msg) => {
   const e1 = new EmbedBuilder().setTitle("📖 Comandos — Prefixo `!`").setColor(0x5865f2)
     .setDescription("Todos os comandos usam **!** no início. Não tem mais slash.")
@@ -2479,10 +2822,11 @@ reg(["ajuda", "help", "comandos"], async (msg) => {
       { name: "🏁 Racha de Carros", value: "`!racha <valor> @user`" },
       { name: "💍 Casamento", value: "`!casar @user`" },
       { name: "🏴 Convite de Gangue", value: "`!ginvitar @user`" },
-      { name: "💼 Empresa", value: "`!empresa` `!ecriar \"<nome>\" <setor> <desc>` `!econtratar @user` `!edemitir @user` `!epagar` `!eanunciar` `!eexpandir` `!eipo <SYM> <preço>` `!esimular` `!elista` `!eextrato`" },
-      { name: "📦 Produtos da Empresa", value: "`!eproduto add \"<nome>\" <preço> <custo>` · `!eproduto rm <id>` · `!eproduto lista [@dono]` · `!ecomprar @dono <id> [qtd]`" },
+      { name: "💼 Empresa", value: "`!empresa` `!ecriar \"<nome>\" <ramo> [desc]` `!econtratar @user` `!edemitir @user` `!epagar` `!eanunciar` `!eexpandir` `!eipo <SYM> <preço>` `!esimular` `!elista` `!eextrato`" },
+      { name: "🏭 Cadeia Produtiva", value: "`!ramos [ramo]` · `!ematerias <mat> [qtd]` · `!emateriais` · `!econstruir` · `!efabrica` · `!eupgradefabrica` · `!efabricar <prodKey> [qtd]` · `!estoque [@dono]`" },
+      { name: "📦 Produtos da Empresa", value: "`!eproduto add fab <prodKey> <preço>` · `!eproduto add \"<nome>\" <preço> <custo>` · `!eproduto rm <id>` · `!eproduto lista [@dono]` · `!ecomprar @dono <id> [qtd]` · `!usar <prodKey>`" },
       { name: "🛠️ Funcionário", value: "`!etrabalhar` (1h cd, ativa comissão por 24h)" },
-      { name: "⚖️ Impeachment", value: "`!impeachment <presidente|prefeito>` (5 apoiadores ✅ em 90s, confisca orçamento)" },
+      { name: "⚖️ Impeachment", value: "`!impeachment <presidente|prefeito>` (30 apoiadores ✅ em 3min, confisca orçamento)" },
       { name: "🧼 Lavagem", value: "`!lavar <valor>`" },
       { name: "✨ Nível & Animações", value: "`!work` · plantar/colher/animal/racha" },
     );
