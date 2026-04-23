@@ -17,9 +17,16 @@ export const commands = [
         .addStringOption(o => o.setName("nome").setDescription("Nome da gangue").setRequired(true))
         .addStringOption(o => o.setName("tag").setDescription("Tag (3-5 letras)").setRequired(true))
       )
-      .addSubcommand(s => s.setName("convidar").setDescription("Convidar jogador")
+      .addSubcommand(s => s.setName("convidar").setDescription("Convidar jogador (ele precisa aceitar)")
         .addUserOption(o => o.setName("jogador").setDescription("Jogador a convidar").setRequired(true))
       )
+      .addSubcommand(s => s.setName("aceitar").setDescription("Aceitar um convite de gangue"))
+      .addSubcommand(s => s.setName("rejeitar").setDescription("Rejeitar um convite de gangue"))
+      .addSubcommand(s => s.setName("convites").setDescription("Ver seus convites pendentes"))
+      .addSubcommand(s => s.setName("banir").setDescription("Expulsar um membro da gangue (líder)")
+        .addUserOption(o => o.setName("jogador").setDescription("Membro a expulsar").setRequired(true))
+      )
+      .addSubcommand(s => s.setName("membros").setDescription("Listar membros da sua gangue"))
       .addSubcommand(s => s.setName("sair").setDescription("Sair da gangue"))
       .addSubcommand(s => s.setName("info").setDescription("Ver info da sua gangue"))
       .addSubcommand(s => s.setName("lista").setDescription("Listar todas as gangues"))
@@ -54,13 +61,72 @@ export const commands = [
       if (sub === "convidar") {
         if (!player.gangId || player.gangRank !== "lider") return interaction.reply({ content: "❌ Apenas o líder pode convidar.", ephemeral: true });
         const target = interaction.options.getUser("jogador", true);
+        if (target.id === player.discordId) return interaction.reply({ content: "❌ Não pode se convidar.", ephemeral: true });
         const targetPlayer = await getOrCreatePlayer(target.id, target.username);
         if (targetPlayer.gangId) return interaction.reply({ content: "❌ Este jogador já está em uma gangue.", ephemeral: true });
 
-        await updatePlayer(target.id, { gangId: player.gangId, gangRank: "membro" });
-        await db.update(schema.gangs).set({ memberCount: sql`${schema.gangs.memberCount} + 1` }).where(eq(schema.gangs.id, player.gangId!));
+        const existing = await db.query.gangInvites.findFirst({
+          where: and(eq(schema.gangInvites.targetId, target.id), eq(schema.gangInvites.gangId, player.gangId!), eq(schema.gangInvites.status, "pending")),
+        });
+        if (existing) return interaction.reply({ content: "❌ Já existe um convite pendente pra esse jogador.", ephemeral: true });
 
-        return interaction.reply({ content: `✅ **${target.username}** foi recrutado para a gangue!` });
+        await db.insert(schema.gangInvites).values({ gangId: player.gangId!, targetId: target.id, inviterId: player.discordId });
+        return interaction.reply({ content: `📨 Convite enviado para **${target.username}**! Ele precisa usar \`/gangue aceitar\` para entrar.` });
+      }
+
+      if (sub === "convites") {
+        const invites = await db.query.gangInvites.findMany({
+          where: and(eq(schema.gangInvites.targetId, player.discordId), eq(schema.gangInvites.status, "pending")),
+        });
+        if (invites.length === 0) return interaction.reply({ content: "📭 Você não tem convites pendentes.", ephemeral: true });
+        const lines: string[] = [];
+        for (const inv of invites) {
+          const g = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, inv.gangId) });
+          if (g) lines.push(`🏴‍☠️ **[${g.tag}] ${g.name}** — convidado por <@${inv.inviterId}>`);
+        }
+        return interaction.reply({ content: `📨 **Convites pendentes:**\n${lines.join("\n")}\n\nUse \`/gangue aceitar\` ou \`/gangue rejeitar\`.`, ephemeral: true });
+      }
+
+      if (sub === "aceitar") {
+        if (player.gangId) return interaction.reply({ content: "❌ Você já está em uma gangue. Saia primeiro.", ephemeral: true });
+        const invite = await db.query.gangInvites.findFirst({
+          where: and(eq(schema.gangInvites.targetId, player.discordId), eq(schema.gangInvites.status, "pending")),
+        });
+        if (!invite) return interaction.reply({ content: "❌ Você não tem convites pendentes.", ephemeral: true });
+
+        await updatePlayer(player.discordId, { gangId: invite.gangId, gangRank: "membro" });
+        await db.update(schema.gangs).set({ memberCount: sql`${schema.gangs.memberCount} + 1` }).where(eq(schema.gangs.id, invite.gangId));
+        await db.update(schema.gangInvites).set({ status: "accepted" }).where(eq(schema.gangInvites.id, invite.id));
+        const g = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, invite.gangId) });
+        return interaction.reply({ content: `✅ Você entrou na gangue **[${g?.tag}] ${g?.name}**!` });
+      }
+
+      if (sub === "rejeitar") {
+        const invite = await db.query.gangInvites.findFirst({
+          where: and(eq(schema.gangInvites.targetId, player.discordId), eq(schema.gangInvites.status, "pending")),
+        });
+        if (!invite) return interaction.reply({ content: "❌ Você não tem convites pendentes.", ephemeral: true });
+        await db.update(schema.gangInvites).set({ status: "rejected" }).where(eq(schema.gangInvites.id, invite.id));
+        return interaction.reply({ content: "❌ Convite rejeitado.", ephemeral: true });
+      }
+
+      if (sub === "banir") {
+        if (!player.gangId || player.gangRank !== "lider") return interaction.reply({ content: "❌ Apenas o líder pode banir.", ephemeral: true });
+        const target = interaction.options.getUser("jogador", true);
+        if (target.id === player.discordId) return interaction.reply({ content: "❌ Não pode se banir. Use `/gangue dissolver`.", ephemeral: true });
+        const targetPlayer = await getOrCreatePlayer(target.id, target.username);
+        if (targetPlayer.gangId !== player.gangId) return interaction.reply({ content: "❌ Esse jogador não é da sua gangue.", ephemeral: true });
+
+        await updatePlayer(target.id, { gangId: null, gangRank: null });
+        await db.update(schema.gangs).set({ memberCount: sql`GREATEST(${schema.gangs.memberCount} - 1, 0)` }).where(eq(schema.gangs.id, player.gangId!));
+        return interaction.reply({ content: `🚫 **${target.username}** foi expulso da gangue!` });
+      }
+
+      if (sub === "membros") {
+        if (!player.gangId) return interaction.reply({ content: "❌ Você não está em uma gangue.", ephemeral: true });
+        const members = await db.query.players.findMany({ where: eq(schema.players.gangId, player.gangId) });
+        const lines = members.map(m => `${m.gangRank === "lider" ? "👑" : "👤"} <@${m.discordId}> ${m.gangRank === "lider" ? "**(Líder)**" : ""}`);
+        return interaction.reply({ content: `👥 **Membros da gangue:**\n${lines.join("\n")}`, ephemeral: true });
       }
 
       if (sub === "sair") {

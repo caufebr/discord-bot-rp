@@ -91,12 +91,32 @@ export const commands = [
         .setTitle("🏛️ Sociedade")
         .setColor(0xffaa00)
         .addFields(
-          { name: "/gangue criar | convidar | sair | info | lista | guerra | banco", value: "Forme uma gangue, declare guerras e gerencie o caixa." },
+          { name: "/gangue criar | convidar | aceitar | rejeitar | convites | banir | membros | sair | info | lista | guerra | banco", value: "Convites agora precisam ser aceitos. Líder pode banir." },
           { name: "/territorio lista | invadir | coletar", value: "Disputa por territórios e renda passiva." },
-          { name: "/empresa criar | info | contratar | demitir | pagar_funcionarios | anunciar | ipo | upgrade | lista", value: "Funde, cresça e abra capital de uma empresa." },
-          { name: "/bolsa lista | comprar | vender | carteira | info", value: "Compre e venda ações de empresas listadas." },
-          { name: "/politica governo | candidatar | votar | propor_lei | eleicao", value: "Participe do governo da cidade." },
+          { name: "/empresa ...", value: "Funde, cresça e abra capital de uma empresa." },
+          { name: "/bolsa | /politica", value: "Mercado de ações e governo da cidade." },
         );
+
+      const personagem = new EmbedBuilder()
+        .setTitle("🪪 Personagem & Vida Pessoal")
+        .setColor(0x4488cc)
+        .addFields(
+          { name: "/perfil estado:<UF> cidade:<nome> genero:<x> politica:<x>", value: "Cria/edita seu RG no primeiro uso." },
+          { name: "/rg [jogador]", value: "Ver ficha completa: estado, cidade, gênero, política, profissão, certificações, casamento." },
+          { name: "/mochila", value: "Ver itens, arma equipada, dinheiro, banco." },
+          { name: "/pet comprar | info | alimentar | renomear | sepultar", value: "Adote pet (R$ 1.500), alimente com ração ou ele MORRE." },
+          { name: "/casar @user · /divorciar", value: "Casamento entre jogadores." },
+        );
+
+      const combate = new EmbedBuilder()
+        .setTitle("⚔️ Armas, Duelo & Prisão")
+        .setColor(0xcc2222)
+        .addFields(
+          { name: "/armas loja | comprar | vender | equipada", value: "5 armas: faca → fuzil. Quanto melhor, mais dano." },
+          { name: "/duelar @user", value: "Duelo simultâneo. **Morte = perde TODO o dinheiro** (carteira+banco), mas mantém certificações." },
+          { name: "/fugir", value: "Tente escapar da prisão respondendo perguntas — acerto reduz 30min, erro mantém preso." },
+        )
+        .setFooter({ text: "💀 Mortes não podem ser roubadas — você só perde o dinheiro." });
 
       const admin = new EmbedBuilder()
         .setTitle("🛠️ Administração")
@@ -109,9 +129,10 @@ export const commands = [
         .setFooter({ text: "Apenas administradores do servidor podem usar /adm." });
 
       await interaction.reply({
-        embeds: [intro, economia, recompensas, fazenda, profissao, crime, cassino, sociedade, admin],
+        embeds: [intro, economia, personagem, combate, fazenda, recompensas, cassino, sociedade, admin],
         ephemeral: true,
       });
+      await interaction.followUp({ embeds: [profissao, crime], ephemeral: true });
     },
   },
 ];

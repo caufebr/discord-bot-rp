@@ -66,3 +66,43 @@ export function isDead(player: Player): boolean {
   }
   return true;
 }
+
+export async function killPlayer(discordId: string, reason: string): Promise<{ lostMoney: number; reason: string }> {
+  const p = await getPlayer(discordId);
+  if (!p) return { lostMoney: 0, reason };
+  const lost = p.balance + p.bankBalance;
+  const deathEnd = new Date(Date.now() + 30 * 60 * 1000);
+  await updatePlayer(discordId, {
+    isDead: true,
+    deathEnd,
+    health: 0,
+    balance: 0,
+    bankBalance: 0,
+    weapon: null,
+    isJailed: false,
+    jailEnd: null,
+    wantedLevel: 0,
+  });
+  return { lostMoney: lost, reason };
+}
+
+export async function refillEnergy(player: Player): Promise<Player> {
+  const now = new Date();
+  const last = player.lastEnergyRefill ?? player.createdAt;
+  const minutes = Math.floor((now.getTime() - last.getTime()) / (60 * 1000));
+  if (minutes < 6) return player;
+  const refill = Math.min(100 - player.energy, Math.floor(minutes / 6) * 5);
+  if (refill <= 0) return player;
+  const newEnergy = Math.min(100, player.energy + refill);
+  await updatePlayer(player.discordId, { energy: newEnergy, lastEnergyRefill: now });
+  return { ...player, energy: newEnergy, lastEnergyRefill: now };
+}
+
+export async function consumeEnergy(discordId: string, amount: number): Promise<boolean> {
+  const p = await getPlayer(discordId);
+  if (!p) return false;
+  const refreshed = await refillEnergy(p);
+  if (refreshed.energy < amount) return false;
+  await updatePlayer(discordId, { energy: refreshed.energy - amount });
+  return true;
+}

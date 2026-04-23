@@ -13,6 +13,11 @@ import { commands as lojaCommands } from "./commands/loja.js";
 import { commands as plantacaoCommands } from "./commands/plantacao.js";
 import { commands as recompensasCommands } from "./commands/recompensas.js";
 import { commands as cassinoCommands } from "./commands/cassino.js";
+import { commands as rgCommands } from "./commands/rg.js";
+import { commands as armasCommands } from "./commands/armas.js";
+import { commands as petCommands } from "./commands/pet.js";
+import { commands as familiaCommands } from "./commands/familia.js";
+import { commands as fugirCommands } from "./commands/fugir.js";
 import { deployCommands } from "./deploy-commands.js";
 import { startWorldEngine } from "./systems/worldEvents.js";
 import { seedDatabase } from "./systems/seed.js";
@@ -38,6 +43,11 @@ const allCommands: BotCommand[] = [
   ...plantacaoCommands,
   ...recompensasCommands,
   ...cassinoCommands,
+  ...rgCommands,
+  ...armasCommands,
+  ...petCommands,
+  ...familiaCommands,
+  ...fugirCommands,
 ];
 
 export async function startBot() {

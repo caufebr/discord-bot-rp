@@ -124,6 +124,29 @@ export async function updateInflation() {
   }).where(eq(schema.worldEconomy.id, 1));
 }
 
+const RADIO_NEWS = [
+  "📻 *Boletim FavelaFM:* O preço do milho subiu 12% essa semana — bom momento para colher!",
+  "📻 *Rádio Comunitária:* Rumores de que uma nova gangue está se formando no centro...",
+  "📻 *Notícias da Cidade:* A polícia intensificou patrulhas — cuidado com /crime hoje.",
+  "📻 *Boletim:* Investidores estão de olho em ações de empresas pequenas. Veja /bolsa.",
+  "📻 *FavelaFM:* Casamentos estão em alta no servidor! Veja se alguém quer dizer 'sim'.",
+  "📻 *Alerta:* Ration de pet em falta nas lojas em breve — abasteçam-se!",
+  "📻 *Rádio:* Um morador anônimo doou R$ 50.000 para o bairro. Quem será?",
+  "📻 *Notícia:* Mercado de armas registra alta na procura por pistolas. Tensão aumenta.",
+  "📻 *Boletim:* A inflação está oscilando — preços podem mudar.",
+  "📻 *Rumores:* Dizem que existe um cofre escondido em algum território...",
+  "📻 *FavelaFM:* O político mais votado promete reduzir os impostos. Será?",
+  "📻 *Notícia:* Festival da cidade pode acontecer a qualquer momento — fique atento!",
+];
+
+export async function broadcastRadio(client: Client, channelId: string) {
+  try {
+    const news = RADIO_NEWS[Math.floor(Math.random() * RADIO_NEWS.length)];
+    const channel = await client.channels.fetch(channelId) as TextChannel;
+    if (channel) await channel.send(news);
+  } catch {}
+}
+
 export function startWorldEngine(client: Client, eventChannelId: string) {
   setInterval(() => updateStockPrices(), 5 * 60 * 1000);
   setInterval(() => updateInflation(), 15 * 60 * 1000);
@@ -132,4 +155,5 @@ export function startWorldEngine(client: Client, eventChannelId: string) {
     const chance = Math.random();
     if (chance < 0.3) triggerRandomEvent(client, eventChannelId);
   }, eventInterval * 60 * 1000);
+  setInterval(() => broadcastRadio(client, eventChannelId), 25 * 60 * 1000);
 }
