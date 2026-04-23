@@ -44,6 +44,18 @@ import {
   findProduct,
   findMaterial,
 } from "./systems/companyBranches.js";
+import {
+  DROGAS, LAB_BUILD_COST, LAB_UPGRADE_BASE, MAX_LAB_LEVEL,
+  GOLPES, PIRAMIDE_MIN_ENTRADA, PIRAMIDE_TAXA_DONO, PIRAMIDE_DURACAO_MS, PIRAMIDE_PAGA_DEPOIS_DE,
+  SUBORNO_ALVOS,
+  DIRT_FACTS, FOFOCA_COST, FOFOCA_SUCCESS, FOFOCA_COOLDOWN_MS, SIGILO_COST_PER_DIRT,
+  SEQUESTRO_DURACAO_MS, SEQUESTRO_RANSOM_MIN, SEQUESTRO_RANSOM_MAX, SEQUESTRO_TAXA_FUGA, SEQUESTRO_DANO_FUGA,
+  MERCADO_TAXA, MERCADO_MAX_OFERTAS,
+  type MarketOffer, type DirtItem, type MissionDef,
+  pickDailyMissions, todayKey,
+  calcInfamia, infamiaTitulo,
+  bumpInf, bumpMissionProgress,
+} from "./systems/salafrario.js";
 import { logger } from "../lib/logger.js";
 
 const PREFIX = "!";
@@ -2780,6 +2792,879 @@ reg(["usar", "consumir"], async (msg, args) => {
   return reply(msg, `${found.product.emoji} Usou **${found.product.name}** — ${efeito}\nRestam ${inv[key]} no inventário.`);
 });
 
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║         🦝  ECOSSISTEMA DO SALAFRÁRIO  — TRÁFICO · GOLPES ·          ║
+// ║         SUBORNO · CHANTAGEM · SEQUESTRO · MERCADO P2P ·              ║
+// ║         VÍCIOS · MISSÕES & INFÂMIA                                   ║
+// ╚══════════════════════════════════════════════════════════════════════╝
+
+// ----------- helpers compartilhados (operam só sobre players.inventory) -----------
+function _inv(p: any): any { return { ...(p.inventory ?? {}) }; }
+function _drogasInv(p: any): Record<string, number> { return { ...((p.inventory?._drogas as Record<string, number>) ?? {}) }; }
+function _vicio(p: any): Record<string, number> { return { ...((p.inventory?._vicio as Record<string, number>) ?? {}) }; }
+function _lab(p: any): { nivel: number; built: number; lastRaid?: number } | null {
+  return (p.inventory?._lab_drogas as any) ?? null;
+}
+function _plantios(p: any): Array<{ id: number; droga: string; plantedAt: number }> {
+  return [...(((p.inventory?._droga_plantios as any[]) ?? []))];
+}
+function _now() { return Date.now(); }
+
+async function _checkRaid(p: any, droga: string): Promise<{ raided: boolean; lostQty: number; jail: boolean } | null> {
+  const def = DROGAS[droga];
+  if (!def) return null;
+  if (Math.random() > def.raidChance) return { raided: false, lostQty: 0, jail: false };
+  // RAID!
+  const inv = _inv(p);
+  const plantios = _plantios(p);
+  const lost = plantios.filter(x => x.droga === droga).length;
+  inv._droga_plantios = plantios.filter(x => x.droga !== droga);
+  inv._lab_drogas = { ...(inv._lab_drogas ?? { nivel: 0, built: 0 }), lastRaid: _now() };
+  const jail = Math.random() < 0.4;
+  const wantedAdd = jail ? 2 : 1;
+  await updatePlayer(p.discordId, {
+    inventory: inv,
+    wantedLevel: p.wantedLevel + wantedAdd,
+    criminalRecord: p.criminalRecord + 1,
+    ...(jail ? { isJailed: true, jailEnd: new Date(_now() + 25 * 60 * 1000) } : {}),
+  });
+  return { raided: true, lostQty: lost, jail };
+}
+
+// ============ TRÁFICO ============
+
+reg(["drogas", "narco", "catalogodrogas"], async (msg) => {
+  const e = new EmbedBuilder()
+    .setTitle("🌿 Catálogo Subterrâneo")
+    .setColor(0x335533)
+    .setDescription("Plantio ilegal → laboratório → produto processado → tráfico. Sempre rola risco de batida policial.")
+    .addFields(
+      ...Object.values(DROGAS).map(d => ({
+        name: `${d.emoji} \`${d.key}\` — ${d.name}`,
+        value:
+          `🌱 cresce em ${d.growMinutes} min · processada: **${d.processedName}** \`${d.processedKey}\` (${d.yieldPerRaw}× por planta)\n` +
+          `🏭 lab nv ${d.labLevel} · custo de processo ${formatMoney(d.laborCost)}/planta\n` +
+          `💵 preço sugerido ${formatMoney(d.basePrice)}/un · vício +${d.addiction} · risco de batida ${(d.raidChance * 100).toFixed(0)}%\n` +
+          `Efeito ao consumir: ${d.effect.type === "energy" ? `⚡+${d.effect.amount} energia` : d.effect.type === "health" ? `❤️+${d.effect.amount} saúde` : `✨+${d.effect.amount} XP`}`,
+      })),
+    );
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["construir_lab", "construirlab", "lab_build"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (_lab(p)) return reply(msg, "❌ Você já tem um laboratório. Veja com `!lab`.");
+  if (p.balance < LAB_BUILD_COST) return reply(msg, `❌ Custa ${formatMoney(LAB_BUILD_COST)}.`);
+  await removeMoney(p.discordId, LAB_BUILD_COST);
+  const inv = _inv(p);
+  inv._lab_drogas = { nivel: 1, built: _now() };
+  await updatePlayer(p.discordId, { inventory: inv });
+  return reply(msg, `🧪 Laboratório clandestino nível 1 montado por ${formatMoney(LAB_BUILD_COST)}. Já dá pra processar **maconha**.`);
+});
+
+reg(["up_lab", "uplab", "lab_up"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const lab = _lab(p);
+  if (!lab) return reply(msg, "❌ Construa o laboratório primeiro com `!construir_lab`.");
+  if (lab.nivel >= MAX_LAB_LEVEL) return reply(msg, "🏆 Laboratório no nível máximo.");
+  const cost = LAB_UPGRADE_BASE * (lab.nivel + 1);
+  if (p.balance < cost) return reply(msg, `❌ Upgrade pra nível ${lab.nivel + 1} custa ${formatMoney(cost)}.`);
+  await removeMoney(p.discordId, cost);
+  const inv = _inv(p);
+  inv._lab_drogas = { ...lab, nivel: lab.nivel + 1 };
+  await updatePlayer(p.discordId, { inventory: inv });
+  return reply(msg, `⚗️ Laboratório subiu pra nível **${lab.nivel + 1}**!`);
+});
+
+reg(["lab"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const lab = _lab(p);
+  if (!lab) return reply(msg, `🧪 Sem laboratório. Construa por ${formatMoney(LAB_BUILD_COST)} com \`!construir_lab\`.`);
+  const liberados = Object.values(DROGAS).filter(d => d.labLevel <= lab.nivel).map(d => `${d.emoji} ${d.processedName}`).join(", ");
+  const e = new EmbedBuilder().setTitle("🧪 Laboratório Clandestino").setColor(0x224422).addFields(
+    { name: "Nível", value: `${lab.nivel}/${MAX_LAB_LEVEL}`, inline: true },
+    { name: "Próx. upgrade", value: lab.nivel >= MAX_LAB_LEVEL ? "—" : `${formatMoney(LAB_UPGRADE_BASE * (lab.nivel + 1))} (\`!up_lab\`)`, inline: true },
+    { name: "Drogas processáveis", value: liberados || "_nenhuma_", inline: false },
+    { name: "Última batida", value: lab.lastRaid ? `<t:${Math.floor(lab.lastRaid / 1000)}:R>` : "Nunca", inline: false },
+  );
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["plantar_d", "plantard", "plantardroga"], async (msg, args) => {
+  const dk = args[0]?.toLowerCase();
+  const def = dk ? DROGAS[dk] : null;
+  if (!def) return reply(msg, "❌ Uso: `!plantar_d <droga>`. Veja com `!drogas`.");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const cost = Math.floor(def.basePrice * 0.15);
+  if (p.balance < cost) return reply(msg, `❌ A semente/precursor custa ${formatMoney(cost)}.`);
+  const plantios = _plantios(p);
+  if (plantios.length >= 6) return reply(msg, "❌ Limite de 6 plantios ilegais ao mesmo tempo.");
+  await removeMoney(p.discordId, cost);
+  const id = (plantios.reduce((m, x) => Math.max(m, x.id), 0) || 0) + 1;
+  plantios.push({ id, droga: def.key, plantedAt: _now() });
+  const inv = _inv(p);
+  inv._droga_plantios = plantios;
+  await updatePlayer(p.discordId, { inventory: inv });
+  return reply(msg, `${def.emoji} Plantou **${def.name}** \`#${id}\` por ${formatMoney(cost)}. Pronta em ${def.growMinutes} min. Cuidado com a polícia.`);
+});
+
+reg(["plantios_d", "plantiosd", "minhasplantas"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const plantios = _plantios(p);
+  if (plantios.length === 0) return reply(msg, "🌱 Sem plantios ilegais. Inicie com `!plantar_d <droga>`.");
+  const lines = plantios.map(x => {
+    const def = DROGAS[x.droga]!;
+    const ms = _now() - x.plantedAt;
+    const total = def.growMinutes * 60 * 1000;
+    const restante = Math.max(0, total - ms);
+    const pronto = restante === 0;
+    return `\`#${x.id}\` ${def.emoji} ${def.name} — ${pronto ? "**PRONTA** (use `!colher_d`)" : `${Math.ceil(restante / 60000)} min`}`;
+  });
+  return reply(msg, { embeds: [new EmbedBuilder().setTitle("🌱 Seus plantios ilegais").setColor(0x335533).setDescription(lines.join("\n"))] });
+});
+
+reg(["colher_d", "colherd", "colherdroga"], async (msg, args) => {
+  const id = intArg(args, 0);
+  if (!id) return reply(msg, "❌ Uso: `!colher_d <id>` (veja em `!plantios_d`)");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const plantios = _plantios(p);
+  const planta = plantios.find(x => x.id === id);
+  if (!planta) return reply(msg, "❌ Plantio não existe.");
+  const def = DROGAS[planta.droga]!;
+  const ready = _now() - planta.plantedAt >= def.growMinutes * 60 * 1000;
+  if (!ready) return reply(msg, "⏳ Ainda não está pronta. Veja `!plantios_d`.");
+
+  // Risco de batida na hora da colheita
+  const raid = await _checkRaid(p, planta.droga);
+  if (raid?.raided) {
+    return reply(msg, `🚔 **BATIDA POLICIAL!** Perdeu ${raid.lostQty} plantio(s) de ${def.name} e levou +${raid.jail ? 2 : 1} ⭐ procurado.${raid.jail ? " Foi preso por 25min." : ""}`);
+  }
+
+  const inv = _inv(p);
+  const drogas = _drogasInv(p);
+  drogas[planta.droga] = (drogas[planta.droga] ?? 0) + 1;
+  inv._drogas = drogas;
+  inv._droga_plantios = plantios.filter(x => x.id !== id);
+  bumpInf(inv, "raids_sobreviveu");
+  await updatePlayer(p.discordId, { inventory: inv });
+  return reply(msg, `${def.emoji} Colheu 1× **${def.name}** (in natura). Processe no laboratório com \`!processar ${def.key}\`.`);
+});
+
+reg(["processar"], async (msg, args) => {
+  const dk = args[0]?.toLowerCase();
+  const qtd = Math.max(1, intArg(args, 1) ?? 1);
+  const def = dk ? DROGAS[dk] : null;
+  if (!def) return reply(msg, "❌ Uso: `!processar <droga> [qtd]`. Veja `!drogas`.");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const lab = _lab(p);
+  if (!lab) return reply(msg, "❌ Sem laboratório. Use `!construir_lab`.");
+  if (lab.nivel < def.labLevel) return reply(msg, `❌ Precisa de laboratório nível **${def.labLevel}** (você tem ${lab.nivel}). \`!up_lab\``);
+  const drogas = _drogasInv(p);
+  if ((drogas[def.key] ?? 0) < qtd) return reply(msg, `❌ Faltam plantas in natura. Você tem ${drogas[def.key] ?? 0}× ${def.name}.`);
+  const custo = def.laborCost * qtd;
+  if (p.balance < custo) return reply(msg, `❌ Custa ${formatMoney(custo)} pra processar.`);
+  await removeMoney(p.discordId, custo);
+  drogas[def.key] = (drogas[def.key] ?? 0) - qtd;
+  drogas[def.processedKey] = (drogas[def.processedKey] ?? 0) + qtd * def.yieldPerRaw;
+  const inv = _inv(p);
+  inv._drogas = drogas;
+  await updatePlayer(p.discordId, { inventory: inv });
+  return reply(msg, `⚗️ Processou ${qtd}× ${def.name} → ${qtd * def.yieldPerRaw}× **${def.processedName}**. Custo ${formatMoney(custo)}. Estoque: ${drogas[def.processedKey]} un.`);
+});
+
+reg(["estoque_d", "estoqued", "narcoestoque"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const drogas = _drogasInv(p);
+  const entries = Object.entries(drogas).filter(([_, q]) => q > 0);
+  if (entries.length === 0) return reply(msg, "📦 Sem estoque ilegal.");
+  const lines = entries.map(([k, q]) => {
+    const planta = DROGAS[k];
+    const proc = Object.values(DROGAS).find(d => d.processedKey === k);
+    const label = planta ? `${planta.emoji} ${planta.name} (in natura)` : proc ? `${proc.emoji} ${proc.processedName}` : k;
+    return `${label} — ${q}`;
+  });
+  return reply(msg, { embeds: [new EmbedBuilder().setTitle("📦 Estoque ilegal").setColor(0x442244).setDescription(lines.join("\n"))] });
+});
+
+reg(["traficar", "vender_d"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  const dk = args[1]?.toLowerCase();
+  const qtd = Math.max(1, intArg(args, 2) ?? 1);
+  const precoArg = intArg(args, 3);
+  if (!tid || !dk) return reply(msg, "❌ Uso: `!traficar @user <drogaProcessadaKey> <qtd> [preço/un]`");
+  if (tid === msg.author.id) return reply(msg, "❌ Não dá pra traficar pra si mesmo.");
+  const def = Object.values(DROGAS).find(d => d.processedKey === dk);
+  if (!def) return reply(msg, "❌ Droga desconhecida (use a chave **processada**, ex.: `maconha_pronta`, `po`, `her`, `meth`).");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const buyer = await getPlayer(tid);
+  if (!buyer) return reply(msg, "❌ Comprador não existe.");
+  const drogas = _drogasInv(p);
+  if ((drogas[dk] ?? 0) < qtd) return reply(msg, `❌ Você só tem ${drogas[dk] ?? 0}× ${def.processedName}.`);
+  const preco = precoArg && precoArg > 0 ? precoArg : def.basePrice;
+  const total = preco * qtd;
+  if (buyer.balance < total) return reply(msg, `❌ Comprador sem grana (tem ${formatMoney(buyer.balance)}, precisa ${formatMoney(total)}).`);
+
+  // chance de delação: 8% por transação; se delatar, autor leva +1 ⭐
+  const denuncia = Math.random() < 0.08;
+
+  await removeMoney(buyer.discordId, total);
+  await addMoney(p.discordId, total);
+  drogas[dk] = (drogas[dk] ?? 0) - qtd;
+  // entrega ao comprador no estoque dele
+  const binv = _inv(buyer);
+  const bdrogas = _drogasInv(buyer);
+  bdrogas[dk] = (bdrogas[dk] ?? 0) + qtd;
+  binv._drogas = bdrogas;
+  await updatePlayer(buyer.discordId, { inventory: binv });
+
+  const inv = _inv(p);
+  inv._drogas = drogas;
+  bumpInf(inv, "traficos");
+  bumpMissionProgress(inv, "traficar");
+  if (denuncia) {
+    await updatePlayer(p.discordId, { inventory: inv, wantedLevel: p.wantedLevel + 1 });
+    return reply(msg, `🚨 ${qtd}× **${def.processedName}** traficado para <@${tid}> por ${formatMoney(total)} — mas o comprador **delatou**. +1 ⭐ procurado.`);
+  } else {
+    await updatePlayer(p.discordId, { inventory: inv });
+    return reply(msg, `🤝 Traficou ${qtd}× **${def.processedName}** para <@${tid}> por ${formatMoney(total)}.`);
+  }
+});
+
+reg(["consumir_d", "consumird", "usar_d"], async (msg, args) => {
+  const dk = args[0]?.toLowerCase();
+  const def = dk ? Object.values(DROGAS).find(d => d.processedKey === dk) : null;
+  if (!def) return reply(msg, "❌ Uso: `!consumir_d <drogaProcessadaKey>`");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const drogas = _drogasInv(p);
+  if ((drogas[dk] ?? 0) < 1) return reply(msg, `❌ Você não tem **${def.processedName}**.`);
+  drogas[dk]--;
+  const vicio = _vicio(p);
+  vicio[def.key] = Math.min(100, (vicio[def.key] ?? 0) + def.addiction);
+  const inv = _inv(p);
+  inv._drogas = drogas;
+  inv._vicio = vicio;
+  bumpMissionProgress(inv, "consumir_d");
+  let efeitoTxt = "";
+  const updates: any = { inventory: inv };
+  if (def.effect.type === "energy") {
+    updates.energy = Math.min(100, p.energy + def.effect.amount);
+    efeitoTxt = `⚡ +${def.effect.amount} energia`;
+  } else if (def.effect.type === "health") {
+    updates.health = Math.min(p.maxHealth, p.health + def.effect.amount);
+    efeitoTxt = `❤️ +${def.effect.amount} saúde`;
+  }
+  await updatePlayer(p.discordId, updates);
+  if (def.effect.type === "xp") { try { await addXp(p.discordId, def.effect.amount); } catch {} efeitoTxt = `✨ +${def.effect.amount} XP`; }
+  return reply(msg, `${def.emoji} Consumiu **${def.processedName}** — ${efeitoTxt}. Vício em **${def.name}**: ${vicio[def.key]}/100.`);
+});
+
+reg(["desintoxicar", "rehab", "clinica"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const vicio = _vicio(p);
+  const total = Object.values(vicio).reduce((s, v) => s + v, 0);
+  if (total === 0) return reply(msg, "✨ Você está limpo, parceiro.");
+  const cost = total * 250;
+  if (p.balance < cost) return reply(msg, `❌ Reabilitação custa ${formatMoney(cost)} (vício total: ${total}). Faltam ${formatMoney(cost - p.balance)}.`);
+  await removeMoney(p.discordId, cost);
+  const inv = _inv(p);
+  inv._vicio = {};
+  await updatePlayer(p.discordId, { inventory: inv });
+  return reply(msg, `🏥 Reabilitação concluída por ${formatMoney(cost)}. Vício zerado.`);
+});
+
+// ============ GOLPES ============
+
+reg(["golpes", "esquemas"], async (msg) => {
+  const e = new EmbedBuilder()
+    .setTitle("💼 Golpes & Esquemas")
+    .setColor(0x664400)
+    .setDescription("Cada golpe tem cooldown e chance de falha. Falha = ⭐ procurado e zero retorno.")
+    .addFields(
+      ...Object.values(GOLPES).map(g => ({
+        name: `${g.emoji} \`${g.key}\` — ${g.name}`,
+        value: `${g.description}\nChance base ${(g.successBase * 100).toFixed(0)}% · cooldown ${Math.round(g.cooldownMs / 60000)} min · falha = +${g.wantedOnFail} ⭐`,
+      })),
+      { name: "🏗️ Pirâmide Financeira", value: `\`!piramide criar <nome> <entrada>\` (mín. ${formatMoney(PIRAMIDE_MIN_ENTRADA)}) — colapsa em ${PIRAMIDE_DURACAO_MS / 3600000}h. Só os ${PIRAMIDE_PAGA_DEPOIS_DE} primeiros recebem 1.8x. Resto perde tudo.` },
+    );
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["golpe"], async (msg, args) => {
+  const tipo = args[0]?.toLowerCase();
+  const g = tipo ? GOLPES[tipo] : null;
+  if (!g) return reply(msg, "❌ Uso: `!golpe <phishing|estelionato|falsoproduto> [@alvo]`. Veja `!golpes`.");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const lastKey = `_last_${g.key}`;
+  const last = ((p.inventory as any)?.[lastKey] as number) ?? 0;
+  if (_now() - last < g.cooldownMs) return reply(msg, `⏳ Aguarde ${formatCooldown(g.cooldownMs - (_now() - last))}.`);
+
+  const tid = getMentionId(msg, args, 1);
+  let alvoBoost = 0;
+  let alvo: any = null;
+  if (tid) {
+    alvo = await getPlayer(tid);
+    if (alvo) alvoBoost = Math.max(-0.2, Math.min(0.25, (50 - alvo.reputation) / 200)); // alvo com baixa rep cai mais fácil
+  }
+
+  const sucesso = Math.random() < (g.successBase + alvoBoost);
+  const inv = _inv(p);
+  inv[lastKey] = _now();
+
+  if (!sucesso) {
+    await updatePlayer(p.discordId, {
+      inventory: inv,
+      wantedLevel: p.wantedLevel + g.wantedOnFail,
+      reputation: Math.max(-100, p.reputation - 5),
+    });
+    return reply(msg, `${g.emoji} ${g.name} **falhou**! +${g.wantedOnFail} ⭐ procurado, -5 reputação.`);
+  }
+
+  const valor = Math.floor(g.rewardMin + Math.random() * (g.rewardMax - g.rewardMin));
+  if (alvo) {
+    if (alvo.balance < valor) {
+      await addMoney(p.discordId, alvo.balance);
+      await updatePlayer(alvo.discordId, { balance: 0 });
+      bumpInf(inv, "golpes");
+      bumpMissionProgress(inv, g.key === "phishing" ? "phishing" : "trabalhar");
+      await updatePlayer(p.discordId, { inventory: inv });
+      return reply(msg, `${g.emoji} ${g.name} **bem-sucedido** contra <@${alvo.discordId}> — ele só tinha ${formatMoney(alvo.balance)}, levou tudo.`);
+    }
+    await removeMoney(alvo.discordId, valor);
+  }
+  await addMoney(p.discordId, valor);
+  bumpInf(inv, "golpes");
+  if (g.key === "phishing") bumpMissionProgress(inv, "phishing");
+  await updatePlayer(p.discordId, { inventory: inv });
+  return reply(msg, `${g.emoji} ${g.name} **bem-sucedido**! Faturou ${formatMoney(valor)}${alvo ? ` de <@${alvo.discordId}>` : ""}.`);
+});
+
+// ====== Pirâmide ======
+reg(["piramide"], async (msg, args) => {
+  const sub = (args[0] ?? "").toLowerCase();
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const inv = _inv(p);
+
+  if (sub === "criar") {
+    const nome = args[1];
+    const entrada = intArg(args, 2);
+    if (!nome || !entrada) return reply(msg, `❌ Uso: \`!piramide criar <nome> <entrada>\` (mín. ${formatMoney(PIRAMIDE_MIN_ENTRADA)})`);
+    if (entrada < PIRAMIDE_MIN_ENTRADA) return reply(msg, `❌ Entrada mínima ${formatMoney(PIRAMIDE_MIN_ENTRADA)}.`);
+    if ((inv._piramide_dono as any)?.ativa) return reply(msg, "❌ Você já tem uma pirâmide ativa. Encerre com `!piramide encerrar`.");
+    const id = `pir_${_now()}`;
+    inv._piramide_dono = { id, nome, entrada, criadoEm: _now(), pote: 0, participantes: 0, ativa: true };
+    await updatePlayer(p.discordId, { inventory: inv });
+    return reply(msg, `🏗️ Pirâmide **${nome}** criada (entrada ${formatMoney(entrada)}). Compartilhe \`!piramide entrar @${p.username}\` com os trouxas. Colapsa em ${PIRAMIDE_DURACAO_MS / 3600000}h.`);
+  }
+
+  if (sub === "entrar") {
+    const tid = getMentionId(msg, args, 1);
+    if (!tid) return reply(msg, "❌ Uso: `!piramide entrar @dono`");
+    const dono = await getPlayer(tid);
+    if (!dono) return reply(msg, "❌ Dono inválido.");
+    const pir = (dono.inventory as any)?._piramide_dono as any;
+    if (!pir || !pir.ativa) return reply(msg, "❌ Esse jogador não tem pirâmide ativa.");
+    if (_now() - pir.criadoEm > PIRAMIDE_DURACAO_MS) return reply(msg, "💥 Essa pirâmide já colapsou.");
+    if (p.balance < pir.entrada) return reply(msg, `❌ Entrada custa ${formatMoney(pir.entrada)}.`);
+    await removeMoney(p.discordId, pir.entrada);
+
+    // 30% pro dono, resto pro pote
+    const taxaDono = Math.floor(pir.entrada * PIRAMIDE_TAXA_DONO);
+    await addMoney(dono.discordId, taxaDono);
+    pir.pote = (pir.pote ?? 0) + (pir.entrada - taxaDono);
+    pir.participantes = (pir.participantes ?? 0) + 1;
+    const dinv = _inv(dono);
+    dinv._piramide_dono = pir;
+    bumpInf(dinv, "pirámides");
+    await updatePlayer(dono.discordId, { inventory: dinv });
+
+    // Registra no investidor
+    const investList = ((p.inventory as any)?._piramide_invest as any[]) ?? [];
+    investList.push({ donoId: dono.discordId, piramideId: pir.id, valor: pir.entrada, ts: _now() });
+    inv._piramide_invest = investList;
+
+    // Se está entre os primeiros N, paga 1.8x na hora (do pote)
+    let payout = 0;
+    if (pir.participantes <= PIRAMIDE_PAGA_DEPOIS_DE) {
+      payout = Math.min(pir.pote, Math.floor(pir.entrada * 1.8));
+      if (payout > 0) {
+        await addMoney(p.discordId, payout);
+        pir.pote -= payout;
+        const dinv2 = _inv(dono);
+        dinv2._piramide_dono = pir;
+        await updatePlayer(dono.discordId, { inventory: dinv2 });
+      }
+    }
+    await updatePlayer(p.discordId, { inventory: inv });
+    return reply(msg, `🏗️ Entrou na pirâmide **${pir.nome}** por ${formatMoney(pir.entrada)}.${payout > 0 ? ` 💸 Você é dos primeiros — recebeu ${formatMoney(payout)} (1.8x).` : " ⚠️ Só os 5 primeiros recebem retorno."}`);
+  }
+
+  if (sub === "status") {
+    const tid = getMentionId(msg, args, 1) ?? p.discordId;
+    const dono = await getPlayer(tid);
+    const pir = (dono?.inventory as any)?._piramide_dono as any;
+    if (!pir) return reply(msg, "❌ Sem pirâmide ativa.");
+    const colapsou = !pir.ativa || _now() - pir.criadoEm > PIRAMIDE_DURACAO_MS;
+    return reply(msg, `🏗️ **${pir.nome}** — entrada ${formatMoney(pir.entrada)} · participantes ${pir.participantes} · pote ${formatMoney(pir.pote)} · ${colapsou ? "💥 COLAPSADA" : `🟢 ativa, colapsa <t:${Math.floor((pir.criadoEm + PIRAMIDE_DURACAO_MS) / 1000)}:R>`}`);
+  }
+
+  if (sub === "encerrar") {
+    const pir = inv._piramide_dono as any;
+    if (!pir || !pir.ativa) return reply(msg, "❌ Sem pirâmide ativa pra encerrar.");
+    const sobra = pir.pote ?? 0;
+    if (sobra > 0) await addMoney(p.discordId, sobra);
+    pir.ativa = false;
+    pir.pote = 0;
+    inv._piramide_dono = pir;
+    await updatePlayer(p.discordId, { inventory: inv, reputation: Math.max(-100, p.reputation - 25) });
+    return reply(msg, `💥 Pirâmide encerrada. Você sumiu com ${formatMoney(sobra)} do pote. Reputação -25.`);
+  }
+
+  return reply(msg, "❌ Uso: `!piramide criar|entrar|status|encerrar`. Veja `!golpes`.");
+});
+
+// ============ SUBORNO ============
+
+reg(["subornar", "suborno"], async (msg, args) => {
+  const alvoKey = args[0]?.toLowerCase();
+  const valor = intArg(args, 1);
+  const alvo = alvoKey ? SUBORNO_ALVOS[alvoKey] : null;
+  if (!alvo) {
+    const lista = Object.values(SUBORNO_ALVOS).map(a => `${a.emoji} \`${a.key}\` — mín ${formatMoney(a.custoMin)} · ${a.description}`).join("\n");
+    return reply(msg, `❌ Uso: \`!subornar <alvo> [valor]\`\n${lista}`);
+  }
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const v = valor && valor >= alvo.custoMin ? valor : alvo.custoMin;
+  if (p.balance < v) return reply(msg, `❌ Custa ${formatMoney(v)}.`);
+  await removeMoney(p.discordId, v);
+
+  // chance de escândalo
+  if (Math.random() < alvo.scandalChance) {
+    await updatePlayer(p.discordId, { wantedLevel: p.wantedLevel + 2, reputation: Math.max(-100, p.reputation - 20), criminalRecord: p.criminalRecord + 1 });
+    return reply(msg, `🚨 ESCÂNDALO! O suborno vazou. +2 ⭐, -20 reputação. Você ainda perdeu o ${formatMoney(v)}.`);
+  }
+
+  const inv = _inv(p);
+  const subs = ((inv._subornos as any[]) ?? []);
+  subs.push({ ts: _now(), alvo: alvo.key, valor: v });
+  inv._subornos = subs.slice(-30);
+  bumpInf(inv, "subornos");
+  bumpMissionProgress(inv, "suborno");
+
+  const updates: any = { inventory: inv };
+  let efeito = "";
+
+  if (alvo.apply === "wanted") {
+    const levels = Math.floor(v / alvo.custoMin);
+    updates.wantedLevel = Math.max(0, p.wantedLevel - levels);
+    efeito = `${alvo.emoji} -${levels} ⭐ procurado (agora ${updates.wantedLevel}).`;
+  } else if (alvo.apply === "jail") {
+    const minutos = Math.floor(v / alvo.custoMin) * 10;
+    if (p.isJailed && p.jailEnd) {
+      const novo = new Date(p.jailEnd.getTime() - minutos * 60 * 1000);
+      const livre = novo.getTime() <= _now();
+      updates.jailEnd = livre ? null : novo;
+      updates.isJailed = !livre;
+      efeito = `${alvo.emoji} -${minutos} min de cadeia. ${livre ? "Você está livre!" : `Sai <t:${Math.floor(novo.getTime() / 1000)}:R>`}.`;
+    } else {
+      efeito = `${alvo.emoji} Compensação na manga: o juiz vai facilitar na próxima.`;
+    }
+  } else if (alvo.apply === "fiscal") {
+    inv._imune_fiscal_ate = _now() + 24 * 60 * 60 * 1000;
+    updates.inventory = inv;
+    efeito = `${alvo.emoji} 24h imune a auditoria. Sonegação zerada nas declarações.`;
+  } else if (alvo.apply === "prefeito") {
+    const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+    if (c) {
+      await db.update(schema.companies).set({ level: c.level + 1 }).where(eq(schema.companies.id, c.id));
+      efeito = `${alvo.emoji} Sua empresa **${c.name}** subiu pra nível ${c.level + 1} sem precisar expandir.`;
+    } else {
+      efeito = `${alvo.emoji} Você não tem empresa — o prefeito agradeceu pelo dinheiro mesmo assim.`;
+    }
+  }
+
+  await updatePlayer(p.discordId, updates);
+  return reply(msg, `🤝 Suborno de ${formatMoney(v)} ao ${alvo.name} aceito.\n${efeito}`);
+});
+
+reg(["subornos"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const subs = ((p.inventory as any)?._subornos as any[]) ?? [];
+  if (subs.length === 0) return reply(msg, "🤝 Sem histórico de subornos. Você é um santo.");
+  const total = subs.reduce((s: number, x: any) => s + x.valor, 0);
+  const lines = subs.slice(-10).reverse().map((x: any) => `<t:${Math.floor(x.ts / 1000)}:R> · ${SUBORNO_ALVOS[x.alvo]?.emoji ?? ""} ${SUBORNO_ALVOS[x.alvo]?.name ?? x.alvo} — ${formatMoney(x.valor)}`);
+  return reply(msg, { embeds: [new EmbedBuilder().setTitle("🤝 Histórico de Subornos").setColor(0x665522).setDescription(lines.join("\n")).setFooter({ text: `Total declarável: ${formatMoney(total)}` })] });
+});
+
+// ============ CHANTAGEM ============
+
+reg(["fofoca", "investigar"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  if (!tid) return reply(msg, "❌ Uso: `!fofoca @user`");
+  if (tid === msg.author.id) return reply(msg, "❌ Investigar a si mesmo? Para que?");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const last = ((p.inventory as any)?._last_fofoca as number) ?? 0;
+  if (_now() - last < FOFOCA_COOLDOWN_MS) return reply(msg, `⏳ Aguarde ${formatCooldown(FOFOCA_COOLDOWN_MS - (_now() - last))}.`);
+  if (p.balance < FOFOCA_COST) return reply(msg, `❌ Custa ${formatMoney(FOFOCA_COST)} pra investigar.`);
+  await removeMoney(p.discordId, FOFOCA_COST);
+  const inv = _inv(p);
+  inv._last_fofoca = _now();
+
+  const t = await getPlayer(tid);
+  if (!t) {
+    await updatePlayer(p.discordId, { inventory: inv });
+    return reply(msg, "❌ Alvo não encontrado.");
+  }
+
+  if (Math.random() > FOFOCA_SUCCESS) {
+    await updatePlayer(p.discordId, { inventory: inv });
+    return reply(msg, `🕵️ Você gastou ${formatMoney(FOFOCA_COST)} mas não achou nada útil sobre <@${tid}>.`);
+  }
+
+  const fact = DIRT_FACTS[Math.floor(Math.random() * DIRT_FACTS.length)]!;
+  const dirts: DirtItem[] = (inv._dirt as DirtItem[]) ?? [];
+  const id = (dirts.reduce((m, x) => Math.max(m, x.id), 0) || 0) + 1;
+  dirts.push({ id, aboutId: tid, aboutName: t.username, fact, collectedAt: _now() });
+  inv._dirt = dirts;
+
+  // grava também no alvo (lista de "sujeira contra mim")
+  const tinv = _inv(t);
+  const against: DirtItem[] = (tinv._dirt_against_me as DirtItem[]) ?? [];
+  against.push({ id, aboutId: tid, aboutName: t.username, fact, collectedAt: _now() });
+  tinv._dirt_against_me = against;
+  await updatePlayer(tid, { inventory: tinv });
+
+  await updatePlayer(p.discordId, { inventory: inv });
+  return reply(msg, `🕵️ Descobriu: **${t.username} ${fact}**. Use \`!chantagear @${t.username} <valor>\` (id ${id}).`);
+});
+
+reg(["chantagear", "extorquir"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  const valor = intArg(args, 1);
+  if (!tid || !valor) return reply(msg, "❌ Uso: `!chantagear @user <valor>`");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const dirts: DirtItem[] = ((p.inventory as any)?._dirt as DirtItem[]) ?? [];
+  const dirt = dirts.find(d => d.aboutId === tid);
+  if (!dirt) return reply(msg, "❌ Você não tem nenhuma sujeira sobre esse jogador. Use `!fofoca @user`.");
+  const t = await getPlayer(tid);
+  if (!t) return reply(msg, "❌ Alvo não existe.");
+  if (t.balance < valor) {
+    // alvo sem dinheiro: a chantagem vaza
+    const ch = msg.channel as TextChannel;
+    await ch.send(`📰 **VAZOU!** <@${t.discordId}> ${dirt.fact}. (Cortesia de <@${p.discordId}>, que tentou chantagear sem o alvo poder pagar.)`).catch(() => {});
+    const inv = _inv(p);
+    inv._dirt = dirts.filter(d => d.id !== dirt.id);
+    bumpInf(inv, "chantagens");
+    await updatePlayer(p.discordId, { inventory: inv });
+    return reply(msg, `🤐 Alvo sem grana — sua sujeira foi pra praça pública.`);
+  }
+
+  // cobra direto (modelo simples): alvo paga e a sujeira é "quitada"
+  await removeMoney(t.discordId, valor);
+  await addMoney(p.discordId, valor);
+  const inv = _inv(p);
+  inv._dirt = dirts.filter(d => d.id !== dirt.id);
+  bumpInf(inv, "chantagens");
+  bumpMissionProgress(inv, "chantagear");
+  await updatePlayer(p.discordId, { inventory: inv });
+
+  // remove do alvo também
+  const tinv = _inv(t);
+  tinv._dirt_against_me = ((tinv._dirt_against_me as DirtItem[]) ?? []).filter((d: DirtItem) => d.id !== dirt.id);
+  await updatePlayer(tid, { inventory: tinv });
+
+  return reply(msg, `💰 Chantageou <@${tid}> em ${formatMoney(valor)}. A sujeira foi guardada de volta no envelope. Por enquanto.`);
+});
+
+reg(["sigilo", "limparficha"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const against: DirtItem[] = ((p.inventory as any)?._dirt_against_me as DirtItem[]) ?? [];
+  if (against.length === 0) return reply(msg, "🧼 Ninguém tem sujeira sobre você.");
+  const cost = against.length * SIGILO_COST_PER_DIRT;
+  if (p.balance < cost) return reply(msg, `❌ Custa ${formatMoney(cost)} (${against.length}× ${formatMoney(SIGILO_COST_PER_DIRT)}).`);
+  await removeMoney(p.discordId, cost);
+  const inv = _inv(p);
+  inv._dirt_against_me = [];
+  await updatePlayer(p.discordId, { inventory: inv });
+
+  // remove do inventário de quem coletou
+  const ids = new Set(against.map(d => d.id));
+  const all = await db.query.players.findMany();
+  for (const other of all) {
+    const oinv = _inv(other);
+    const list = (oinv._dirt as DirtItem[] | undefined) ?? [];
+    const filtered = list.filter((d: DirtItem) => !ids.has(d.id));
+    if (filtered.length !== list.length) {
+      oinv._dirt = filtered;
+      await updatePlayer(other.discordId, { inventory: oinv });
+    }
+  }
+  return reply(msg, `🧼 Pagou ${formatMoney(cost)} e selou ${against.length} sujeira(s) que tinham contra você.`);
+});
+
+// ============ SEQUESTRO ============
+
+reg(["sequestrar", "kidnap"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  const ransom = intArg(args, 1);
+  if (!tid || !ransom) return reply(msg, `❌ Uso: \`!sequestrar @user <resgate>\` (entre ${formatMoney(SEQUESTRO_RANSOM_MIN)} e ${formatMoney(SEQUESTRO_RANSOM_MAX)})`);
+  if (tid === msg.author.id) return reply(msg, "❌ Auto-sequestro? Vai num psicólogo.");
+  if (ransom < SEQUESTRO_RANSOM_MIN || ransom > SEQUESTRO_RANSOM_MAX) return reply(msg, `❌ Resgate entre ${formatMoney(SEQUESTRO_RANSOM_MIN)} e ${formatMoney(SEQUESTRO_RANSOM_MAX)}.`);
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (!p.weapon) return reply(msg, "❌ Precisa de arma equipada (`!arma loja`).");
+  const t = await getPlayer(tid);
+  if (!t) return reply(msg, "❌ Alvo não existe.");
+  if ((t.inventory as any)?._sequestrado_por) return reply(msg, "❌ Esse jogador já está sequestrado.");
+
+  // chance: força do criminoso vs reputação do alvo
+  const chance = 0.55 + (p.reputation < 0 ? 0.1 : 0) - (t.reputation > 50 ? 0.1 : 0);
+  if (Math.random() > chance) {
+    await updatePlayer(p.discordId, { wantedLevel: p.wantedLevel + 2, health: Math.max(0, p.health - 25), criminalRecord: p.criminalRecord + 1 });
+    return reply(msg, `❌ Tentativa de sequestro **falhou**! <@${t.discordId}> reagiu, você levou 25 de dano e +2 ⭐ procurado.`);
+  }
+
+  const until = _now() + SEQUESTRO_DURACAO_MS;
+  const tinv = _inv(t);
+  tinv._sequestrado_por = { kidnapperId: p.discordId, ransom, until };
+  await updatePlayer(tid, { inventory: tinv });
+
+  const inv = _inv(p);
+  const seqs = ((inv._sequestros as any[]) ?? []);
+  seqs.push({ victimId: tid, ransom, until });
+  inv._sequestros = seqs;
+  bumpInf(inv, "sequestros");
+  bumpMissionProgress(inv, "sequestro");
+  await updatePlayer(p.discordId, { inventory: inv, wantedLevel: p.wantedLevel + 1, criminalRecord: p.criminalRecord + 1 });
+
+  return reply(msg, `🪤 <@${tid}> foi sequestrado! Resgate: **${formatMoney(ransom)}**. Solto <t:${Math.floor(until / 1000)}:R>. A vítima pode tentar fugir com \`!fugir_seq\` ou alguém pode pagar com \`!resgatar @${t.username}\`.`);
+});
+
+reg(["resgatar", "pagarresgate"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  if (!tid) return reply(msg, "❌ Uso: `!resgatar @vitima`");
+  const t = await getPlayer(tid);
+  if (!t) return reply(msg, "❌ Vítima não existe.");
+  const seq = (t.inventory as any)?._sequestrado_por;
+  if (!seq) return reply(msg, "❌ Esse jogador não está sequestrado.");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (p.balance < seq.ransom) return reply(msg, `❌ Resgate custa ${formatMoney(seq.ransom)}.`);
+  await removeMoney(p.discordId, seq.ransom);
+  await addMoney(seq.kidnapperId, seq.ransom);
+
+  const tinv = _inv(t);
+  tinv._sequestrado_por = null;
+  await updatePlayer(tid, { inventory: tinv });
+
+  const kidnapper = await getPlayer(seq.kidnapperId);
+  if (kidnapper) {
+    const kinv = _inv(kidnapper);
+    kinv._sequestros = ((kinv._sequestros as any[]) ?? []).filter((s: any) => s.victimId !== tid);
+    await updatePlayer(seq.kidnapperId, { inventory: kinv });
+  }
+  return reply(msg, `🆓 <@${p.discordId}> pagou ${formatMoney(seq.ransom)} de resgate. <@${tid}> está livre.`);
+});
+
+reg(["fugir_seq", "fugirseq", "escapar"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const seq = (p.inventory as any)?._sequestrado_por;
+  if (!seq) return reply(msg, "✋ Você não está sequestrado.");
+  if (Math.random() < SEQUESTRO_TAXA_FUGA) {
+    const inv = _inv(p);
+    inv._sequestrado_por = null;
+    bumpInf(inv, "fugas");
+    await updatePlayer(p.discordId, { inventory: inv });
+    // remove do kidnapper
+    const k = await getPlayer(seq.kidnapperId);
+    if (k) {
+      const kinv = _inv(k);
+      kinv._sequestros = ((kinv._sequestros as any[]) ?? []).filter((s: any) => s.victimId !== p.discordId);
+      await updatePlayer(seq.kidnapperId, { inventory: kinv });
+    }
+    return reply(msg, "🏃 Você fugiu do cativeiro!");
+  }
+  await updatePlayer(p.discordId, { health: Math.max(1, p.health - SEQUESTRO_DANO_FUGA) });
+  return reply(msg, `❌ Tentativa de fuga falhou — apanhou e perdeu ${SEQUESTRO_DANO_FUGA} de saúde.`);
+});
+
+reg(["sequestros"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const seqs = ((p.inventory as any)?._sequestros as any[]) ?? [];
+  const ativos = seqs.filter((s: any) => s.until > _now());
+  if (ativos.length === 0) return reply(msg, "🪤 Sem sequestros ativos.");
+  return reply(msg, `🪤 Reféns:\n${ativos.map((s: any) => `<@${s.victimId}> — ${formatMoney(s.ransom)} · solta <t:${Math.floor(s.until / 1000)}:R>`).join("\n")}`);
+});
+
+// ============ MERCADO P2P ============
+
+reg(["ofertar", "anunciar_item"], async (msg, args) => {
+  const itemKey = args[0];
+  const qtd = Math.max(1, intArg(args, 1) ?? 1);
+  const preco = intArg(args, 2);
+  if (!itemKey || !preco) return reply(msg, "❌ Uso: `!ofertar <itemKey> <qtd> <preço total>`. Itens válidos: o que você tiver no inventário (chaves do `!inv`).");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const inv: any = _inv(p);
+  const have = (inv[itemKey] as number) ?? 0;
+  if (have < qtd) return reply(msg, `❌ Você só tem ${have} de \`${itemKey}\`.`);
+  const ofertas: MarketOffer[] = (inv._mercado_ofertas as MarketOffer[]) ?? [];
+  if (ofertas.length >= MERCADO_MAX_OFERTAS) return reply(msg, `❌ Máximo ${MERCADO_MAX_OFERTAS} ofertas ativas.`);
+  const id = Math.floor(Date.now() / 1000) * 100 + Math.floor(Math.random() * 100);
+  inv[itemKey] = have - qtd; // reserva
+  const fp = findProduct(itemKey);
+  const itemName = fp ? `${fp.product.emoji} ${fp.product.name}` : itemKey;
+  ofertas.push({ id, sellerId: p.discordId, sellerName: p.username, itemKey, itemName, qtd, preco, criadoEm: _now() });
+  inv._mercado_ofertas = ofertas;
+  await updatePlayer(p.discordId, { inventory: inv });
+  return reply(msg, `📢 Oferta \`#${id}\` criada: ${qtd}× ${itemName} por ${formatMoney(preco)}. Compradores usam \`!comprar_oferta ${id}\`.`);
+});
+
+reg(["mercado", "marketplace"], async (msg) => {
+  const all = await db.query.players.findMany();
+  const ofertas: MarketOffer[] = [];
+  for (const pl of all) {
+    const list = ((pl.inventory as any)?._mercado_ofertas as MarketOffer[]) ?? [];
+    for (const o of list) ofertas.push(o);
+  }
+  if (ofertas.length === 0) return reply(msg, "🛒 Mercado vazio. Anuncie algo com `!ofertar`.");
+  const lines = ofertas.slice(0, 25).map(o => `\`#${o.id}\` ${o.itemName} ×${o.qtd} — **${formatMoney(o.preco)}** _(vendedor: ${o.sellerName})_`);
+  const e = new EmbedBuilder().setTitle("🛒 Mercado P2P").setColor(0x224488).setDescription(lines.join("\n")).setFooter({ text: `Compre com !comprar_oferta <id> · taxa ${(MERCADO_TAXA * 100).toFixed(0)}%` });
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["comprar_oferta", "comprarof"], async (msg, args) => {
+  const id = intArg(args, 0);
+  if (!id) return reply(msg, "❌ Uso: `!comprar_oferta <id>` (veja em `!mercado`)");
+  const all = await db.query.players.findMany();
+  let seller: any = null;
+  let offer: MarketOffer | null = null;
+  for (const pl of all) {
+    const list = ((pl.inventory as any)?._mercado_ofertas as MarketOffer[]) ?? [];
+    const o = list.find(x => x.id === id);
+    if (o) { seller = pl; offer = o; break; }
+  }
+  if (!offer || !seller) return reply(msg, "❌ Oferta não existe.");
+  const buyer = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (buyer.discordId === seller.discordId) return reply(msg, "❌ Não compre de si mesmo.");
+  if (buyer.balance < offer.preco) return reply(msg, `❌ Faltam ${formatMoney(offer.preco - buyer.balance)}.`);
+
+  const taxa = Math.floor(offer.preco * MERCADO_TAXA);
+  const liquido = offer.preco - taxa;
+  await removeMoney(buyer.discordId, offer.preco);
+  await addMoney(seller.discordId, liquido);
+
+  // entrega item ao comprador
+  const binv: any = _inv(buyer);
+  binv[offer.itemKey] = (binv[offer.itemKey] ?? 0) + offer.qtd;
+  await updatePlayer(buyer.discordId, { inventory: binv });
+
+  // remove oferta do vendedor
+  const sinv: any = _inv(seller);
+  sinv._mercado_ofertas = ((sinv._mercado_ofertas as MarketOffer[]) ?? []).filter((o: MarketOffer) => o.id !== id);
+  await updatePlayer(seller.discordId, { inventory: sinv });
+
+  await logTransaction(buyer.discordId, seller.discordId, offer.preco, "marketplace", `${offer.qtd}× ${offer.itemName}`);
+  return reply(msg, `🛒 Comprou ${offer.qtd}× ${offer.itemName} por ${formatMoney(offer.preco)} (taxa ${formatMoney(taxa)}). Item entregue no inventário.`);
+});
+
+reg(["retirar_oferta", "retirarof"], async (msg, args) => {
+  const id = intArg(args, 0);
+  if (!id) return reply(msg, "❌ Uso: `!retirar_oferta <id>`");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const inv: any = _inv(p);
+  const ofertas: MarketOffer[] = (inv._mercado_ofertas as MarketOffer[]) ?? [];
+  const o = ofertas.find(x => x.id === id);
+  if (!o) return reply(msg, "❌ Você não tem oferta com esse id.");
+  inv[o.itemKey] = (inv[o.itemKey] ?? 0) + o.qtd;
+  inv._mercado_ofertas = ofertas.filter((x: MarketOffer) => x.id !== id);
+  await updatePlayer(p.discordId, { inventory: inv });
+  return reply(msg, `↩️ Oferta \`#${id}\` retirada e itens devolvidos ao inventário.`);
+});
+
+// ============ MISSÕES DIÁRIAS ============
+
+function _ensureMissions(p: any): { day: string; list: MissionDef[]; progress: Record<string, number>; claimed: string[] } {
+  const inv: any = p.inventory ?? {};
+  const today = todayKey();
+  const cur = inv._missoes;
+  if (cur && cur.day === today && Array.isArray(cur.list)) return cur;
+  const fresh = { day: today, list: pickDailyMissions(today + p.discordId), progress: {} as Record<string, number>, claimed: [] as string[] };
+  return fresh;
+}
+
+reg(["missoes", "daily_missions", "missao"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const m = _ensureMissions(p);
+  if (((p.inventory as any)?._missoes?.day) !== m.day) {
+    const inv = _inv(p);
+    inv._missoes = m;
+    await updatePlayer(p.discordId, { inventory: inv });
+  }
+  const e = new EmbedBuilder().setTitle("📋 Missões Diárias").setColor(0x008844)
+    .setDescription("Resetam todo dia (UTC). Resgate com `!resgatarmissao <key>`.")
+    .addFields(m.list.map(mis => {
+      const prog = Math.min(mis.goal, m.progress[mis.key] ?? 0);
+      const done = prog >= mis.goal;
+      const claimed = m.claimed.includes(mis.key);
+      return {
+        name: `\`${mis.key}\` ${mis.description}`,
+        value: `Progresso ${prog}/${mis.goal} · Recompensa ${formatMoney(mis.reward)} ${claimed ? "✅ resgatada" : done ? "🎁 pronta" : ""}`,
+      };
+    }));
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["resgatarmissao", "resgatemissao", "claimmissao"], async (msg, args) => {
+  const key = args[0];
+  if (!key) return reply(msg, "❌ Uso: `!resgatarmissao <key>` (veja `!missoes`).");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const m = _ensureMissions(p);
+  const mis = m.list.find(x => x.key === key);
+  if (!mis) return reply(msg, "❌ Missão não existe (ou já passou).");
+  if (m.claimed.includes(mis.key)) return reply(msg, "✅ Já resgatada.");
+  const prog = m.progress[mis.key] ?? 0;
+  if (prog < mis.goal) return reply(msg, `❌ Faltam ${mis.goal - prog} pra completar.`);
+  m.claimed.push(mis.key);
+  await addMoney(p.discordId, mis.reward);
+  const inv = _inv(p);
+  inv._missoes = m;
+  await updatePlayer(p.discordId, { inventory: inv });
+  return reply(msg, `🎁 Missão **${mis.description}** concluída! Recebeu ${formatMoney(mis.reward)}.`);
+});
+
+// ============ INFÂMIA ============
+
+reg(["infamia", "score", "ranksal"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0) ?? msg.author.id;
+  const t = await getPlayer(tid) ?? await getOrCreatePlayer(tid, msg.author.username);
+  const c = ((t.inventory as any)?._inf_counters) as any;
+  const score = calcInfamia(c);
+  const tit = infamiaTitulo(score);
+  const lines: string[] = [];
+  lines.push(`**Pontuação:** ${score}`);
+  lines.push(`**Título:** ${tit.emoji} ${tit.titulo}`);
+  if (c) {
+    lines.push("");
+    lines.push(`Golpes: ${c.golpes ?? 0} · Subornos: ${c.subornos ?? 0} · Sequestros: ${c.sequestros ?? 0}`);
+    lines.push(`Tráficos: ${c.traficos ?? 0} · Chantagens: ${c.chantagens ?? 0} · Pirâmides: ${c.pirámides ?? 0}`);
+    lines.push(`Fugas: ${c.fugas ?? 0} · Batidas sobreviveu: ${c.raids_sobreviveu ?? 0}`);
+  }
+  const e = new EmbedBuilder().setTitle(`🦝 Infâmia — ${t.username}`).setColor(0x550044).setDescription(lines.join("\n"));
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["topinfamia", "topsalafrarios"], async (msg) => {
+  const all = await db.query.players.findMany({ limit: 200 });
+  const ranked = all
+    .map(p => ({ p, score: calcInfamia(((p.inventory as any)?._inf_counters) as any) }))
+    .filter(x => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+  if (ranked.length === 0) return reply(msg, "🦝 Ninguém tem infâmia ainda. Vai lá fazer estrago.");
+  const lines = ranked.map((x, i) => {
+    const t = infamiaTitulo(x.score);
+    return `${i + 1}. ${t.emoji} **${x.p.username}** — ${x.score} pts (${t.titulo})`;
+  });
+  return reply(msg, { embeds: [new EmbedBuilder().setTitle("🏴‍☠️ Top 10 Salafrários").setColor(0x550044).setDescription(lines.join("\n"))] });
+});
+
 reg(["ajuda", "help", "comandos"], async (msg) => {
   const e1 = new EmbedBuilder().setTitle("📖 Comandos — Prefixo `!`").setColor(0x5865f2)
     .setDescription("Todos os comandos usam **!** no início. Não tem mais slash.")
@@ -2831,7 +3716,16 @@ reg(["ajuda", "help", "comandos"], async (msg) => {
       { name: "🧼 Lavagem", value: "`!lavar <valor>`" },
       { name: "✨ Nível & Animações", value: "`!work` · plantar/colher/animal/racha" },
     );
-  return msg.reply({ embeds: [e1, e2, e3, e4] }).catch(() => {});
+  const e5 = new EmbedBuilder().setColor(0x550044).setTitle("🦝 Ecossistema do Salafrário").setDescription("Do zero ao avançado: tráfico, golpes, suborno, chantagem, sequestro, mercado P2P, vícios, missões e infâmia.").addFields(
+      { name: "🌿 Tráfico de Drogas", value: "`!drogas` `!construir_lab` `!up_lab` `!lab` · `!plantar_d <droga>` `!plantios_d` `!colher_d <id>` · `!processar <droga> [qtd]` · `!estoque_d` · `!traficar @user <prodKey> <qtd> [preço]` · `!consumir_d <prodKey>` · `!desintoxicar`" },
+      { name: "💼 Golpes & Pirâmides", value: "`!golpes` · `!golpe phishing|estelionato|falsoproduto [@alvo]` · `!piramide criar <nome> <entrada>` `!piramide entrar @dono` `!piramide status` `!piramide encerrar`" },
+      { name: "🤝 Suborno & Corrupção", value: "`!subornar policia|juiz|fiscal|prefeito [valor]` · `!subornos`" },
+      { name: "🤐 Chantagem", value: "`!fofoca @user` (descobre sujeira) · `!chantagear @user <valor>` · `!sigilo` (limpa sujeira contra você)" },
+      { name: "🪤 Sequestro", value: "`!sequestrar @user <resgate>` · `!resgatar @vitima` · `!fugir_seq` · `!sequestros`" },
+      { name: "🛒 Mercado P2P", value: "`!mercado` · `!ofertar <itemKey> <qtd> <preço>` · `!comprar_oferta <id>` · `!retirar_oferta <id>`" },
+      { name: "📋 Missões & Infâmia", value: "`!missoes` · `!resgatarmissao <key>` · `!infamia [@user]` · `!topinfamia`" },
+    );
+  return msg.reply({ embeds: [e1, e2, e3, e4, e5] }).catch(() => {});
 });
 
 // ============ DISPATCHER ============
