@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+**/dist
+.git
+.gitignore
+.env
+.env.*
+*.log
+attached_assets
+zipFile.zip
+.local
+.replit
+replit.nix
+nixpacks.toml
+README.md

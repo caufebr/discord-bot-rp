@@ -1,5 +1,5 @@
 import { SlashCommandBuilder, EmbedBuilder, type ChatInputCommandInteraction } from "discord.js";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { db, schema } from "../systems/db.js";
 import { getOrCreatePlayer, updatePlayer, removeMoney, formatMoney, isJailed } from "../systems/player.js";
 import { cooldownLeft, formatCooldown } from "../systems/economy.js";
@@ -58,7 +58,7 @@ export const commands = [
         if (targetPlayer.gangId) return interaction.reply({ content: "❌ Este jogador já está em uma gangue.", ephemeral: true });
 
         await updatePlayer(target.id, { gangId: player.gangId, gangRank: "membro" });
-        await db.update(schema.gangs).set({ memberCount: db.select().from(schema.players) }).where(eq(schema.gangs.id, player.gangId!));
+        await db.update(schema.gangs).set({ memberCount: sql`${schema.gangs.memberCount} + 1` }).where(eq(schema.gangs.id, player.gangId!));
 
         return interaction.reply({ content: `✅ **${target.username}** foi recrutado para a gangue!` });
       }

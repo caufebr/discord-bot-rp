@@ -20,7 +20,7 @@ import { logger } from "../lib/logger.js";
 
 interface BotCommand {
   data: { name: string; toJSON(): object };
-  execute(interaction: ChatInputCommandInteraction): Promise<void>;
+  execute(interaction: ChatInputCommandInteraction): Promise<unknown>;
 }
 
 const allCommands: BotCommand[] = [
