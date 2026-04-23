@@ -1,9 +1,8 @@
 import { SlashCommandBuilder, EmbedBuilder, type ChatInputCommandInteraction } from "discord.js";
 import { getOrCreatePlayer, getPlayer, updatePlayer, removeMoney, formatMoney, isJailed, isHospitalized, isDead } from "../systems/player.js";
-import { getEconomy, logTransaction, cooldownLeft, formatCooldown, PROFESSIONS, applyTax, type ProfessionKey, calcSalary } from "../systems/economy.js";
+import { getEconomy, logTransaction, cooldownLeft, formatCooldown, applyTax } from "../systems/economy.js";
 
 const WORK_COOLDOWN = 60 * 60 * 1000; // 1h
-const SALARY_COOLDOWN = 8 * 60 * 60 * 1000; // 8h
 
 export const commands = [
   {
@@ -111,25 +110,6 @@ export const commands = [
       await logTransaction(null, player.discordId, amount, "work", "Bico");
 
       return interaction.reply({ content: `💼 Você fez um bico e ganhou ${formatMoney(amount)} (após impostos)!` });
-    },
-  },
-  {
-    data: new SlashCommandBuilder().setName("salario").setDescription("Receber salário da sua profissão"),
-    async execute(interaction: ChatInputCommandInteraction) {
-      const player = await getOrCreatePlayer(interaction.user.id, interaction.user.username);
-      if (!player.profession || !player.isCertified) return interaction.reply({ content: "❌ Você não tem profissão certificada. Use `/profissao` para ver as opções.", ephemeral: true });
-      if (isJailed(player)) return interaction.reply({ content: "❌ Você está preso!", ephemeral: true });
-
-      const cd = cooldownLeft(player.lastSalary, SALARY_COOLDOWN);
-      if (cd > 0) return interaction.reply({ content: `⏳ Próximo salário em ${formatCooldown(cd)}.`, ephemeral: true });
-
-      const prof = player.profession as ProfessionKey;
-      const salary = await calcSalary(prof);
-      const net = await applyTax(salary);
-      await updatePlayer(player.discordId, { balance: player.balance + net, lastSalary: new Date() });
-      await logTransaction(null, player.discordId, net, "salary", `Salário de ${PROFESSIONS[prof].name}`);
-
-      return interaction.reply({ content: `${PROFESSIONS[prof].emoji} Salário de **${PROFESSIONS[prof].name}** recebido!\nBruto: ${formatMoney(salary)} → Líquido: ${formatMoney(net)}` });
     },
   },
 ];
