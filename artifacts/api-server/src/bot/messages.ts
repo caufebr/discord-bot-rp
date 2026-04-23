@@ -2215,7 +2215,8 @@ reg(["impeachment", "impeach"], async (msg, args) => {
   if (!officerId) return reply(msg, `❌ Não há ${target} no momento.`);
   if (officerId === msg.author.id) return reply(msg, "❌ Você não pode pedir o próprio impeachment.");
 
-  const sent = await msg.channel.send({
+  const ch = msg.channel as TextChannel;
+  const sent = await ch.send({
     embeds: [
       new EmbedBuilder()
         .setTitle("⚖️ PEDIDO DE IMPEACHMENT")
@@ -2249,7 +2250,7 @@ reg(["impeachment", "impeach"], async (msg, args) => {
   }
 
   if (supporters.length < 30) {
-    return msg.channel.send(`❌ Impeachment falhou: ${supporters.length}/30 apoiadores.`).catch(() => {});
+    return ch.send(`❌ Impeachment falhou: ${supporters.length}/30 apoiadores.`).catch(() => {});
   }
 
   // Remove from government
@@ -2270,7 +2271,7 @@ reg(["impeachment", "impeach"], async (msg, args) => {
   const share = Math.floor(orc / all.length);
   if (share > 0) for (const id of all) await addMoney(id, share);
 
-  return msg.channel.send({
+  return ch.send({
     embeds: [
       new EmbedBuilder()
         .setTitle("⚖️ IMPEACHMENT APROVADO")
