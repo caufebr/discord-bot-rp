@@ -63,6 +63,118 @@ function intArg(args: string[], idx: number): number | null {
   return Number.isFinite(v) && v > 0 ? v : null;
 }
 
+// ============ HELPERS GLOBAIS ============
+// GIFs animados (URLs públicas Tenor — Discord renderiza no embed.setImage)
+export const GIFS: Record<string, string> = {
+  work:    "https://media.tenor.com/L2EZkXKp9DkAAAAC/working-hard-simpsons.gif",
+  plant:   "https://media.tenor.com/AKpukQwSDmcAAAAC/farming-game.gif",
+  harvest: "https://media.tenor.com/Wu0w2cYABaAAAAAC/wheat-harvest.gif",
+  farm:    "https://media.tenor.com/lB-IoDaTDjkAAAAC/farm-animals.gif",
+  race:    "https://media.tenor.com/HG6gAOTKnHwAAAAC/fast-and-furious.gif",
+  vote:    "https://media.tenor.com/Bt1PTpYNXukAAAAC/voting.gif",
+  company: "https://media.tenor.com/r1RpXp0nfkkAAAAC/business-meeting.gif",
+  money:   "https://media.tenor.com/m2MK1mOQ_OkAAAAC/money-rain.gif",
+  level:   "https://media.tenor.com/n_Vk1NqI8oQAAAAC/level-up.gif",
+  fight:   "https://media.tenor.com/lXMU0VhU8oQAAAAC/fight.gif",
+};
+
+// Confirmação por reação ✅ / ❌
+export async function awaitConfirm(targetMsg: any, userId: string, timeoutMs = 30000): Promise<boolean | null> {
+  if (!targetMsg) return null;
+  await targetMsg.react("✅").catch(() => {});
+  await targetMsg.react("❌").catch(() => {});
+  try {
+    const collected = await targetMsg.awaitReactions({
+      filter: (r: any, u: any) => u.id === userId && (r.emoji.name === "✅" || r.emoji.name === "❌"),
+      max: 1, time: timeoutMs, errors: ["time"],
+    });
+    const r = collected.first();
+    if (!r) return null;
+    return r.emoji.name === "✅";
+  } catch { return null; }
+}
+
+// Reação 1️⃣ 2️⃣ 3️⃣ — escolhas múltiplas
+export async function awaitChoice(targetMsg: any, userId: string, n: number, timeoutMs = 30000): Promise<number | null> {
+  if (!targetMsg) return null;
+  const NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"];
+  const valid = NUMS.slice(0, Math.min(n, NUMS.length));
+  for (const e of valid) await targetMsg.react(e).catch(() => {});
+  try {
+    const collected = await targetMsg.awaitReactions({
+      filter: (r: any, u: any) => u.id === userId && valid.includes(r.emoji.name),
+      max: 1, time: timeoutMs, errors: ["time"],
+    });
+    const r = collected.first();
+    if (!r) return null;
+    return valid.indexOf(r.emoji.name);
+  } catch { return null; }
+}
+
+// Animação por edição de mensagem (multi-frame)
+export async function animate(msg: Message, frames: { content?: string; image?: string; title?: string; color?: number }[], delayMs = 700): Promise<void> {
+  const buildEmbed = (f: any) => {
+    const e = new EmbedBuilder().setColor(f.color ?? 0x5865f2);
+    if (f.title) e.setTitle(f.title);
+    if (f.content) e.setDescription(f.content);
+    if (f.image) e.setImage(f.image);
+    return e;
+  };
+  const sent = await msg.reply({ embeds: [buildEmbed(frames[0])] }).catch(() => null);
+  if (!sent) return;
+  for (let i = 1; i < frames.length; i++) {
+    await new Promise(r => setTimeout(r, delayMs));
+    await sent.edit({ embeds: [buildEmbed(frames[i])] }).catch(() => {});
+  }
+}
+
+// ============ XP / NÍVEL DO JOGADOR ============
+const XP_PER_LEVEL = 200;
+export function getXp(p: any): number { return (p.inventory?._xp as number) ?? 0; }
+export function getPlayerLevel(p: any): number { return Math.floor(getXp(p) / XP_PER_LEVEL); }
+export async function addXp(playerId: string, amount: number): Promise<{ leveled: boolean; newLevel: number }> {
+  const fresh = await getPlayer(playerId);
+  if (!fresh) return { leveled: false, newLevel: 0 };
+  const inv = { ...(fresh.inventory ?? {}) };
+  const oldXp = (inv._xp as number) ?? 0;
+  const newXp = oldXp + amount;
+  inv._xp = newXp;
+  await updatePlayer(playerId, { inventory: inv });
+  const oldLevel = Math.floor(oldXp / XP_PER_LEVEL);
+  const newLevel = Math.floor(newXp / XP_PER_LEVEL);
+  return { leveled: newLevel > oldLevel, newLevel };
+}
+
+// Escala social: nível mínimo pra exercer cada profissão
+export const PROFESSION_REQUIRED_LEVEL: Record<string, number> = {
+  faxineiro: 0, entregador: 0, atendente: 0,
+  garcom: 3, mecanico: 3, bombeiro: 3, aeromoca: 3,
+  policial: 5, professor: 5,
+  engenheiro: 10, advogado: 10, medico: 10,
+  piloto: 15, juiz: 15, empresario: 15,
+};
+
+// Profissões expandidas (mescla com PROFESSIONS de economy.ts; se faltar usa fallback)
+export const EXTRA_PROFESSIONS: Record<string, { name: string; emoji: string; baseSalary: number; courseCost: number }> = {
+  faxineiro:  { name: "Faxineiro",  emoji: "🧹", baseSalary: 800,  courseCost: 0 },
+  entregador: { name: "Entregador", emoji: "📦", baseSalary: 1200, courseCost: 0 },
+  atendente:  { name: "Atendente",  emoji: "🛎️", baseSalary: 1500, courseCost: 0 },
+  garcom:     { name: "Garçom",     emoji: "🍽️", baseSalary: 2200, courseCost: 0 },
+  professor:  { name: "Professor",  emoji: "📚", baseSalary: 4500, courseCost: 0 },
+  engenheiro: { name: "Engenheiro", emoji: "👷", baseSalary: 9000, courseCost: 0 },
+  juiz:       { name: "Juiz",       emoji: "⚖️", baseSalary: 15000, courseCost: 0 },
+};
+function getProfMeta(k: string): { name: string; emoji: string; baseSalary: number } | null {
+  return (PROFESSIONS as any)[k] ?? EXTRA_PROFESSIONS[k] ?? null;
+}
+
+// Slots de plantação/animal armazenados no inventory
+export const DEFAULT_SLOTS = { planta: 3, animal: 2 };
+export function getSlots(p: any, kind: "planta" | "animal"): number {
+  const key = `_slot_${kind}`;
+  return (p.inventory?.[key] as number) ?? DEFAULT_SLOTS[kind];
+}
+
 // ============ ECONOMIA ============
 reg(["saldo", "bal"], async (msg) => {
   const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
@@ -132,26 +244,49 @@ reg(["work", "trabalhar"], async (msg) => {
   if (isHospitalized(p)) return reply(msg, "❌ Você está hospitalizado!");
   if (isDead(p)) return reply(msg, "❌ Você está morto!");
   const cd = cooldownLeft(p.lastWork, 60 * 60 * 1000);
-  if (cd > 0) return reply(msg, `⏳ Aguarde ${formatCooldown(cd)}.`);
-  const base = Math.floor(Math.random() * 300 + 100);
+  if (cd > 0) return reply(msg, `⏳ Aguarde ${formatCooldown(cd)} pro próximo expediente.`);
+  const lvl = getPlayerLevel(p);
+  // Quanto maior o nível, mais ganha por turno
+  const base = Math.floor(Math.random() * 200 + 150) * (1 + lvl * 0.15);
   const amount = Math.floor(await applyTax(base));
+  const xpGain = 15 + Math.floor(Math.random() * 6);
   await updatePlayer(p.discordId, { balance: p.balance + amount, lastWork: new Date() });
-  await logTransaction(null, p.discordId, amount, "work", "Bico");
-  return reply(msg, `💼 Bico feito! Ganhou ${formatMoney(amount)}.`);
+  await logTransaction(null, p.discordId, amount, "work", "Expediente");
+  const { leveled, newLevel } = await addXp(p.discordId, xpGain);
+  // Se já tem profissão exercendo, ganha 1 nível de prática (rumo a certificação)
+  if (p.profession) {
+    const newProfLvl = (p.professionLevel ?? 0) + 1;
+    await updatePlayer(p.discordId, { professionLevel: newProfLvl, isCertified: newProfLvl >= 10 });
+  }
+  await animate(msg, [
+    { title: "💼 Indo trabalhar...", content: `${msg.author.username} bate o ponto.`, image: GIFS.work, color: 0x4488cc },
+    { title: "💼 Trabalhando...", content: `Esforçando-se no expediente... \`${"█".repeat(3)}${"░".repeat(7)}\``, image: GIFS.work, color: 0x4488cc },
+    { title: "💼 Quase lá...", content: `Última hora do turno... \`${"█".repeat(7)}${"░".repeat(3)}\``, image: GIFS.work, color: 0x4488cc },
+    {
+      title: "✅ Expediente concluído!",
+      content: `💰 +${formatMoney(amount)}\n✨ +${xpGain} XP (Nível ${getPlayerLevel({ inventory: { _xp: getXp(p) + xpGain } })})${leveled ? `\n🎉 **SUBIU PARA NÍVEL ${newLevel}!**` : ""}\n⏳ Próximo expediente em 1h`,
+      image: leveled ? GIFS.level : GIFS.money,
+      color: leveled ? 0xffaa00 : 0x00aa44,
+    },
+  ], 800);
 });
 
 reg(["sal", "salario"], async (msg) => {
   const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
-  if (!p.profession || !p.isCertified) return reply(msg, "❌ Sem profissão certificada. Use `!profs`.");
+  if (!p.profession) return reply(msg, "❌ Você não tem profissão. Veja `!profs` e use `!curso <profissão>` (sem custo).");
   if (isJailed(p)) return reply(msg, "❌ Você está preso!");
   const cd = cooldownLeft(p.lastSalary, 8 * 60 * 60 * 1000);
   if (cd > 0) return reply(msg, `⏳ Próximo salário em ${formatCooldown(cd)}.`);
-  const prof = p.profession as ProfessionKey;
-  const salary = await calcSalary(prof);
+  const meta = getProfMeta(p.profession);
+  if (!meta) return reply(msg, "❌ Profissão inválida.");
+  const lvl = getPlayerLevel(p);
+  const profLvl = p.professionLevel ?? 0;
+  // Salário escala com nível social + prática na profissão
+  const salary = Math.floor(meta.baseSalary * (1 + lvl * 0.1) * (1 + profLvl * 0.05));
   const net = await applyTax(salary);
   await updatePlayer(p.discordId, { balance: p.balance + net, lastSalary: new Date() });
-  await logTransaction(null, p.discordId, net, "salary", `Salário ${PROFESSIONS[prof].name}`);
-  return reply(msg, `${PROFESSIONS[prof].emoji} Salário recebido: ${formatMoney(net)} (bruto ${formatMoney(salary)}).`);
+  await logTransaction(null, p.discordId, net, "salary", `Salário ${meta.name}`);
+  return reply(msg, `${meta.emoji} **Salário recebido**\n💰 ${formatMoney(net)} (bruto ${formatMoney(salary)})\n📊 Nv ${lvl} · Prática Nv ${profLvl}${profLvl >= 10 ? " · 🎖️ Certificado" : ""}\n⏳ Próximo em 8h`);
 });
 
 // ============ RECOMPENSAS ============
@@ -268,36 +403,46 @@ reg(["rg"], async (msg, args) => {
   return reply(msg, { embeds: [e] });
 });
 
-// ============ PROFISSÕES ============
+// ============ PROFISSÕES (escala social por nível) ============
 reg(["profs", "profissoes"], async (msg) => {
-  const e = new EmbedBuilder().setTitle("👔 Profissões").setColor(0x00aaff);
-  for (const [k, prof] of Object.entries(PROFESSIONS)) {
-    e.addFields({ name: `${prof.emoji} ${prof.name}`, value: `Curso: ${formatMoney(prof.courseCost)} | Salário base: ${formatMoney(prof.baseSalary)}\n\`!curso ${k}\``, inline: false });
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const lvl = getPlayerLevel(p);
+  const all = { ...PROFESSIONS, ...EXTRA_PROFESSIONS } as Record<string, { name: string; emoji: string; baseSalary: number }>;
+  const tiers: Record<string, string[]> = { "🟢 Tier 1 (Nv 0+)": [], "🔵 Tier 2 (Nv 3+)": [], "🟡 Tier 3 (Nv 5+)": [], "🟠 Tier 4 (Nv 10+)": [], "🔴 Tier 5 (Nv 15+)": [] };
+  for (const [k, prof] of Object.entries(all)) {
+    const req = PROFESSION_REQUIRED_LEVEL[k] ?? 0;
+    const lock = lvl >= req ? "" : " 🔒";
+    const line = `${prof.emoji} **${prof.name}** — ${formatMoney(prof.baseSalary)}/turno · \`!curso ${k}\`${lock}`;
+    if (req >= 15) tiers["🔴 Tier 5 (Nv 15+)"].push(line);
+    else if (req >= 10) tiers["🟠 Tier 4 (Nv 10+)"].push(line);
+    else if (req >= 5) tiers["🟡 Tier 3 (Nv 5+)"].push(line);
+    else if (req >= 3) tiers["🔵 Tier 2 (Nv 3+)"].push(line);
+    else tiers["🟢 Tier 1 (Nv 0+)"].push(line);
+  }
+  const e = new EmbedBuilder().setTitle("👔 Escala Social de Profissões").setColor(0x00aaff)
+    .setDescription(`Seu nível atual: **${lvl}** · XP: ${getXp(p)}/${(lvl + 1) * XP_PER_LEVEL}\nUse \`!work\` (a cada 1h) pra ganhar XP e subir de nível.`);
+  for (const [tier, lines] of Object.entries(tiers)) {
+    if (lines.length > 0) e.addFields({ name: tier, value: lines.join("\n"), inline: false });
   }
   return reply(msg, { embeds: [e] });
 });
 
-reg(["curso"], async (msg, args) => {
-  const k = args[0]?.toLowerCase() as ProfessionKey;
-  if (!k || !(PROFESSIONS as any)[k]) return reply(msg, "❌ Uso: `!curso <profissao>`. Veja `!profs`.");
-  const prof = PROFESSIONS[k];
+reg(["curso", "escolherprof"], async (msg, args) => {
+  const k = args[0]?.toLowerCase();
+  if (!k) return reply(msg, "❌ Uso: `!curso <profissao>`. Veja `!profs`.");
+  const meta = getProfMeta(k);
+  if (!meta) return reply(msg, "❌ Profissão desconhecida. Veja `!profs`.");
+  const req = PROFESSION_REQUIRED_LEVEL[k] ?? 0;
   const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
-  if (p.isTraining) return reply(msg, "❌ Já está em curso.");
-  if (p.balance < prof.courseCost) return reply(msg, `❌ Custa ${formatMoney(prof.courseCost)}.`);
-  await removeMoney(p.discordId, prof.courseCost);
-  const end = new Date(Date.now() + 30 * 60 * 1000);
-  await updatePlayer(p.discordId, { isTraining: true, trainingEnd: end, trainingFor: k });
-  return reply(msg, `📚 Curso de **${prof.name}** iniciado. Use \`!treinar\` em 30 min.`);
+  const lvl = getPlayerLevel(p);
+  if (lvl < req) return reply(msg, `🔒 Precisa de nível **${req}** pra exercer **${meta.name}**. Você está no nível ${lvl}. Use \`!work\` pra subir.`);
+  // Trocar de profissão zera o nível de prática (mas mantém XP global)
+  await updatePlayer(p.discordId, { profession: k, professionLevel: 0, isCertified: false, isTraining: false, trainingEnd: null, trainingFor: null });
+  return reply(msg, `${meta.emoji} Agora você exerce **${meta.name}**!\n📈 A cada \`!work\` você ganha 1 nível de prática. No nível 10 vira certificado oficial.\n💰 Salário base: ${formatMoney(meta.baseSalary)} (a cada 8h via \`!sal\`)`);
 });
 
 reg(["treinar"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
-  if (!p.isTraining || !p.trainingFor) return reply(msg, "❌ Não está em curso.");
-  if (p.trainingEnd && new Date() < p.trainingEnd) return reply(msg, `⏳ Faltam ${formatCooldown(p.trainingEnd.getTime() - Date.now())}.`);
-  const certs = [...(p.certifications ?? [])];
-  if (!certs.includes(p.trainingFor)) certs.push(p.trainingFor);
-  await updatePlayer(p.discordId, { isTraining: false, trainingEnd: null, trainingFor: null, profession: p.trainingFor, isCertified: true, certifications: certs });
-  return reply(msg, `🎓 Você se certificou em **${PROFESSIONS[p.trainingFor as ProfessionKey].name}**! Use \`!sal\`.`);
+  return reply(msg, "ℹ️ O sistema de cursos foi substituído. Agora basta usar `!work` pra ganhar prática na sua profissão. No nível 10 de prática você vira certificado.");
 });
 
 // ============ SAÚDE ============
@@ -468,6 +613,12 @@ reg(["plantar"], async (msg, args) => {
   if (!inv[seed] || inv[seed]! <= 0) return reply(msg, "❌ Você não tem essa semente.");
   const item = (SHOP_ITEMS as any)[seed];
   if (!item || item.type !== "seed") return reply(msg, "❌ Item não é semente.");
+  // Verifica slots
+  const activePlots = await db.query.plots.findMany({ where: and(eq(schema.plots.ownerId, p.discordId), eq(schema.plots.harvested, false)) });
+  const maxSlots = getSlots(p, "planta");
+  if (activePlots.length >= maxSlots) {
+    return reply(msg, `🚫 Você já tem **${activePlots.length}/${maxSlots}** canteiros ocupados. Compre mais com \`!comprarslot planta\`.`);
+  }
   const crop = CROPS[item.cropKey!]!;
   let minutes = crop.growMinutes;
   if (inv["fertilizante"] && inv["fertilizante"]! > 0) {
@@ -478,7 +629,17 @@ reg(["plantar"], async (msg, args) => {
   const ready = new Date(Date.now() + minutes * 60 * 1000);
   await db.insert(schema.plots).values({ ownerId: p.discordId, crop: item.cropKey!, readyAt: ready });
   await updatePlayer(p.discordId, { inventory: inv });
-  return reply(msg, `🌱 ${crop.emoji} ${crop.name} plantado! Pronto em ${minutes} min${inv["fertilizante"] !== undefined ? " (com fertilizante)" : ""}.`);
+  await animate(msg, [
+    { title: "🌍 Preparando o solo...", content: "Removendo pedras e ervas daninhas.", image: GIFS.plant, color: 0x88aa44 },
+    { title: "🚜 Arando o terreno...", content: "Revolvendo a terra...", image: GIFS.plant, color: 0x88aa44 },
+    { title: "🌱 Plantando a semente...", content: `${crop.emoji} ${crop.name}`, image: GIFS.plant, color: 0x88aa44 },
+    { title: "💧 Regando...", content: "Água fresquinha...", image: GIFS.plant, color: 0x4488cc },
+    {
+      title: "✅ Plantado com sucesso!",
+      content: `${crop.emoji} **${crop.name}** plantado.\n⏳ Pronto em ${minutes} min${inv["fertilizante"] !== undefined ? " (com fertilizante)" : ""}.\n🪴 Canteiros: ${activePlots.length + 1}/${maxSlots}`,
+      image: GIFS.plant, color: 0x00aa44,
+    },
+  ], 700);
 });
 
 reg(["plant", "plantacao"], async (msg) => {
@@ -500,16 +661,41 @@ reg(["colher"], async (msg) => {
   const harvestable = ready.filter(r => r.readyAt.getTime() <= Date.now());
   if (harvestable.length === 0) return reply(msg, "🌾 Nada pronto ainda.");
   let total = 0;
+  const cropNames: string[] = [];
   for (const pl of harvestable) {
     const crop = CROPS[pl.crop]!;
     const earn = Math.floor(Math.random() * (crop.sellMax - crop.sellMin) + crop.sellMin);
     total += earn;
+    cropNames.push(`${crop.emoji} ${crop.name}`);
     await db.update(schema.plots).set({ harvested: true }).where(eq(schema.plots.id, pl.id));
   }
   const net = await applyTax(total);
   await addMoney(p.discordId, net);
   await logTransaction(null, p.discordId, net, "harvest", `Colheita ${harvestable.length}`);
-  return reply(msg, `🌾 Colheu ${harvestable.length} plantação(ões) por ${formatMoney(net)}.`);
+  await animate(msg, [
+    { title: "🌾 Indo até a roça...", content: "Pegando a foice e os baldes.", image: GIFS.harvest, color: 0xddaa00 },
+    { title: "🌾 Colhendo...", content: cropNames.slice(0, 5).join(", "), image: GIFS.harvest, color: 0xddaa00 },
+    { title: "🛒 Vendendo no mercado...", content: "Carregando o caminhão...", image: GIFS.money, color: 0x44aa00 },
+    { title: "✅ Colheita finalizada!", content: `📦 **${harvestable.length}** colheita(s)\n💰 +${formatMoney(net)} (após impostos)`, image: GIFS.money, color: 0x00aa44 },
+  ], 700);
+});
+
+// ============ SLOTS DA FAZENDA ============
+reg(["comprarslot", "comprarslots"], async (msg, args) => {
+  const kind = args[0]?.toLowerCase();
+  if (kind !== "planta" && kind !== "animal") return reply(msg, "❌ Uso: `!comprarslot <planta|animal>`");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const cur = getSlots(p, kind);
+  // Custo dobra a cada slot extra
+  const extras = cur - DEFAULT_SLOTS[kind];
+  const cost = 5000 * Math.pow(2, extras);
+  if (p.balance < cost) return reply(msg, `❌ Custa ${formatMoney(cost)} pra ir de ${cur}→${cur + 1} slots de ${kind}. Você tem ${formatMoney(p.balance)}.`);
+  await removeMoney(p.discordId, cost);
+  const inv = { ...(p.inventory ?? {}) };
+  inv[`_slot_${kind}`] = cur + 1;
+  await updatePlayer(p.discordId, { inventory: inv });
+  await logTransaction(p.discordId, "FARM", cost, "slot_buy", `+1 slot ${kind}`);
+  return reply(msg, `✅ Comprou +1 slot de **${kind}** por ${formatMoney(cost)}. Total: **${cur + 1}** slots.`);
 });
 
 // ============ CASSINO ============
@@ -665,8 +851,25 @@ reg(["ginvitar", "gconvidar"], async (msg, args) => {
   const t = await getPlayer(tid);
   if (!t) return reply(msg, "❌ Alvo inválido.");
   if (t.gangId) return reply(msg, "❌ Alvo já está em uma gangue.");
+  const gang = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, p.gangId) });
+  const e = new EmbedBuilder().setTitle("📨 Convite de Gangue").setColor(0x880088)
+    .setDescription(`<@${tid}>, você foi convidado para **${gang?.name ?? "?"}** [${gang?.tag ?? "?"}] por <@${msg.author.id}>.\n\nReaja ✅ pra aceitar ou ❌ pra recusar (60s).`);
+  const sent = await msg.reply({ content: `<@${tid}>`, embeds: [e] }).catch(() => null);
+  if (!sent) return;
   await db.insert(schema.gangInvites).values({ gangId: p.gangId, targetId: tid, inviterId: p.discordId });
-  return reply(msg, `📨 Convite enviado para <@${tid}>. Ele deve usar \`!gaceitar\` ou \`!grejeitar\`.`);
+  const ok = await awaitConfirm(sent, tid, 60000);
+  const inv = await db.query.gangInvites.findFirst({ where: and(eq(schema.gangInvites.targetId, tid), eq(schema.gangInvites.status, "pending")) });
+  if (!inv) return;
+  if (ok === true) {
+    const t2 = await getPlayer(tid);
+    if (t2?.gangId) return sent.reply("❌ Esse alvo já entrou em outra gangue.").catch(() => {});
+    await updatePlayer(tid, { gangId: p.gangId, gangRank: "membro" });
+    await db.update(schema.gangInvites).set({ status: "accepted" }).where(eq(schema.gangInvites.id, inv.id));
+    if (gang) await db.update(schema.gangs).set({ memberCount: gang.memberCount + 1 }).where(eq(schema.gangs.id, gang.id));
+    return sent.reply(`✅ <@${tid}> entrou na gangue **${gang?.name ?? "?"}**!`).catch(() => {});
+  }
+  await db.update(schema.gangInvites).set({ status: "rejected" }).where(eq(schema.gangInvites.id, inv.id));
+  return sent.reply(ok === false ? `❌ <@${tid}> recusou o convite.` : `⏰ Tempo esgotado — convite expirado.`).catch(() => {});
 });
 
 reg(["gaceitar"], async (msg) => {
@@ -911,9 +1114,19 @@ reg(["animal"], async (msg, args) => {
   const s = ANIMAL_SPECIES[sp]!;
   const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
   if (p.balance < s.buyPrice) return reply(msg, `❌ Custa ${formatMoney(s.buyPrice)}.`);
+  // Verifica slots
+  const liveAnimals = await db.query.farmAnimals.findMany({ where: and(eq(schema.farmAnimals.ownerId, p.discordId), eq(schema.farmAnimals.alive, true)) });
+  const maxSlots = getSlots(p, "animal");
+  if (liveAnimals.length >= maxSlots) {
+    return reply(msg, `🚫 Você já tem **${liveAnimals.length}/${maxSlots}** animais vivos. Compre mais com \`!comprarslot animal\`.`);
+  }
   await removeMoney(p.discordId, s.buyPrice);
   await db.insert(schema.farmAnimals).values({ ownerId: p.discordId, species: sp, name: nome, readyAt: new Date(Date.now() + s.growHours * 60 * 60 * 1000) });
-  return reply(msg, `${s.emoji} Comprou ${s.name}${nome ? ` "${nome}"` : ""}. Pronto em ${s.growHours}h.`);
+  await animate(msg, [
+    { title: "🚛 Indo ao mercado pecuário...", content: "Negociando com o vendedor.", image: GIFS.farm, color: 0x88aa44 },
+    { title: `${s.emoji} Trazendo o animal pra fazenda...`, content: `${s.name}${nome ? ` "${nome}"` : ""}`, image: GIFS.farm, color: 0x88aa44 },
+    { title: "✅ Animal comprado!", content: `${s.emoji} ${s.name}${nome ? ` "${nome}"` : ""} adicionado.\n⏳ Pronto em ${s.growHours}h\n🐾 Animais: ${liveAnimals.length + 1}/${maxSlots}`, image: GIFS.farm, color: 0x00aa44 },
+  ], 800);
 });
 
 reg(["alimentar"], async (msg, args) => {
@@ -986,6 +1199,7 @@ reg(["petsep"], async (msg) => {
 });
 
 // ============ FAMÍLIA ============
+const CASAMENTO_TAXA = 10000;
 reg(["casar"], async (msg, args) => {
   const tid = getMentionId(msg, args, 0);
   if (!tid || tid === msg.author.id) return reply(msg, "❌ Uso: `!casar @user`");
@@ -993,9 +1207,24 @@ reg(["casar"], async (msg, args) => {
   const t = await getPlayer(tid);
   if (!t) return reply(msg, "❌ Alvo inválido.");
   if (p.partnerId || t.partnerId) return reply(msg, "❌ Alguém já está casado.");
-  await updatePlayer(p.discordId, { partnerId: tid, marriedAt: new Date() });
-  await updatePlayer(tid, { partnerId: p.discordId, marriedAt: new Date() });
-  return reply(msg, `💍 ${msg.author.username} e ${t.username} estão casados!`);
+  if (p.balance < CASAMENTO_TAXA) return reply(msg, `❌ A taxa do cartório custa ${formatMoney(CASAMENTO_TAXA)} (você paga). Saldo atual: ${formatMoney(p.balance)}.`);
+  const e = new EmbedBuilder().setTitle("💍 Pedido de casamento").setColor(0xff66aa).setDescription(
+    `<@${msg.author.id}> está pedindo <@${tid}> em casamento!\n💸 Taxa do cartório: **${formatMoney(CASAMENTO_TAXA)}** (paga pelo proponente)\n\n<@${tid}>, reaja ✅ pra aceitar ou ❌ pra recusar (60s).`,
+  );
+  const sent = await msg.reply({ content: `<@${tid}>`, embeds: [e] }).catch(() => null);
+  if (!sent) return;
+  const ok = await awaitConfirm(sent, tid, 60000);
+  if (ok !== true) return sent.reply(ok === false ? `💔 <@${tid}> recusou o pedido.` : `⏰ <@${tid}> não respondeu.`).catch(() => {});
+  const fresh = await getPlayer(msg.author.id);
+  if (!fresh || fresh.balance < CASAMENTO_TAXA) return sent.reply("❌ Proponente ficou sem dinheiro pra taxa.").catch(() => {});
+  await removeMoney(msg.author.id, CASAMENTO_TAXA);
+  await logTransaction(msg.author.id, "CARTORIO", CASAMENTO_TAXA, "marriage", `Cartório`);
+  await updatePlayer(msg.author.id, { partnerId: tid, marriedAt: new Date() });
+  await updatePlayer(tid, { partnerId: msg.author.id, marriedAt: new Date() });
+  const e2 = new EmbedBuilder().setTitle("💖 Casados!").setColor(0xff3399).setDescription(
+    `🎉 <@${msg.author.id}> e <@${tid}> agora estão **casados**!\n💸 Taxa paga: ${formatMoney(CASAMENTO_TAXA)}`,
+  ).setImage(GIFS.money);
+  return sent.reply({ embeds: [e2] }).catch(() => {});
 });
 
 reg(["divorciar"], async (msg) => {
@@ -1171,29 +1400,24 @@ reg(["moral", "escolha"], async (msg) => {
   const cd = cooldownLeft(p.lastMoral, 60 * 60 * 1000);
   if (cd > 0) return reply(msg, `⏳ Aguarde ${formatCooldown(cd)} pra outra escolha moral.`);
   const sc = pickRandomScenario();
-  const optionsText = sc.options.map((o, i) => `**${i + 1}.** ${o.label}`).join("\n");
-  await reply(msg, `🤔 **Dilema Moral**\n\n${sc.scenario}\n\n${optionsText}\n\nResponda com o número (1, 2 ou 3) em até 30s.`);
-  const filter = (m: Message) => m.author.id === msg.author.id && /^[1-3]$/.test(m.content.trim());
-  const ch = msg.channel as TextChannel;
-  try {
-    const collected = await ch.awaitMessages?.({ filter, max: 1, time: 30000, errors: ["time"] });
-    const choiceMsg = collected?.first();
-    if (!choiceMsg) return reply(msg, "⏰ Tempo esgotado. Você ficou paralisado.");
-    const idx = parseInt(choiceMsg.content.trim(), 10) - 1;
-    const opt = sc.options[idx];
-    if (!opt) return;
-    const fresh = await getPlayer(msg.author.id);
-    if (!fresh) return;
-    await updatePlayer(msg.author.id, {
-      balance: Math.max(0, fresh.balance + opt.money),
-      karma: fresh.karma + opt.karma,
-      reputation: fresh.reputation + opt.rep,
-      lastMoral: new Date(),
-    });
-    return reply(msg, `📜 ${opt.outcome}\n\n💰 ${opt.money >= 0 ? "+" : ""}${formatMoney(opt.money)} · 🧘 ${opt.karma >= 0 ? "+" : ""}${opt.karma} karma · ⭐ ${opt.rep >= 0 ? "+" : ""}${opt.rep} rep`);
-  } catch {
-    return reply(msg, "⏰ Tempo esgotado.");
-  }
+  const optionsText = sc.options.map((o, i) => `${["1️⃣", "2️⃣", "3️⃣"][i]} ${o.label}`).join("\n");
+  const e = new EmbedBuilder().setTitle("🤔 Dilema Moral").setColor(0xaa44ff)
+    .setDescription(`${sc.scenario}\n\n${optionsText}\n\nReaja com o número correspondente em até 30s.`);
+  const sent = await msg.reply({ embeds: [e] }).catch(() => null);
+  if (!sent) return;
+  const idx = await awaitChoice(sent, msg.author.id, sc.options.length, 30000);
+  if (idx === null) return sent.reply("⏰ Tempo esgotado. Você ficou paralisado.").catch(() => {});
+  const opt = sc.options[idx];
+  if (!opt) return;
+  const fresh = await getPlayer(msg.author.id);
+  if (!fresh) return;
+  await updatePlayer(msg.author.id, {
+    balance: Math.max(0, fresh.balance + opt.money),
+    karma: fresh.karma + opt.karma,
+    reputation: fresh.reputation + opt.rep,
+    lastMoral: new Date(),
+  });
+  return sent.reply(`📜 ${opt.outcome}\n\n💰 ${opt.money >= 0 ? "+" : ""}${formatMoney(opt.money)} · 🧘 ${opt.karma >= 0 ? "+" : ""}${opt.karma} karma · ⭐ ${opt.rep >= 0 ? "+" : ""}${opt.rep} rep`).catch(() => {});
 });
 
 // ============ IMPOSTO DE RENDA ============
@@ -1526,9 +1750,60 @@ reg(["apurar", "encerrar_eleicao"], async (msg) => {
   const govUpdate: any = election.position === "presidente" ? { presidentId: winnerId } : { mayorId: winnerId };
   await db.update(schema.government).set({ ...govUpdate, updatedAt: new Date() }).where(eq(schema.government.id, 1));
 
+  // ORÇAMENTO POLÍTICO — vencedor recebe verba pública para usar (compra de votos, etc)
+  const ORC = election.position === "presidente" ? 200000 : 80000;
+  const winner = await getPlayer(winnerId);
+  if (winner) {
+    const inv = { ...(winner.inventory ?? {}) };
+    inv["_orcamento_politico"] = ((inv["_orcamento_politico"] as number) ?? 0) + ORC;
+    await updatePlayer(winnerId, { inventory: inv });
+  }
+
   const tallyText = sorted.slice(0, 5).map(([id, n], i) => `${i + 1}. <@${id}> — ${n} voto(s)`).join("\n");
-  const e = new EmbedBuilder().setTitle(`🏆 Apuração — ${election.position}`).setColor(0xffcc00).setDescription(`Vencedor: <@${winnerId}> (${winnerVotes} votos)\n\n${tallyText}`);
+  const e = new EmbedBuilder().setTitle(`🏆 Apuração — ${election.position}`).setColor(0xffcc00).setImage(GIFS.vote)
+    .setDescription(`👑 Vencedor: <@${winnerId}> (${winnerVotes} votos)\n💼 Orçamento político liberado: **${formatMoney(ORC)}**\n_(use \`!comprarvoto @user <valor>\` em eleições futuras pra trocar votos por dinheiro)_\n\n${tallyText}`);
   return reply(msg, { embeds: [e] });
+});
+
+// COMPRA DE VOTOS — usa orçamento político do candidato no poder
+reg(["comprarvoto", "subornar"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  const v = intArg(args, msg.mentions.users.size > 0 ? 0 : 1);
+  if (!tid || !v) return reply(msg, "❌ Uso: `!comprarvoto @user <valor>` — paga o usuário e força o voto dele em você na eleição ativa.");
+  if (tid === msg.author.id) return reply(msg, "❌ Não pode subornar a si mesmo.");
+  const election = await db.query.elections.findFirst({ where: eq(schema.elections.isActive, true) });
+  if (!election) return reply(msg, "❌ Sem eleição ativa.");
+  const candidates = (election.candidates as string[]) ?? [];
+  if (!candidates.includes(msg.author.id)) return reply(msg, "❌ Você não é candidato nesta eleição.");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const orc = (p.inventory?._orcamento_politico as number) ?? 0;
+  if (orc < v) return reply(msg, `❌ Seu orçamento político é ${formatMoney(orc)}. (ganhe orçamento ganhando uma eleição anterior)`);
+  // Convite com reação ao alvo
+  const e = new EmbedBuilder().setTitle("💼 Proposta de suborno eleitoral").setColor(0x884444)
+    .setDescription(`<@${tid}>, <@${msg.author.id}> está te oferecendo **${formatMoney(v)}** pra você votar nele(a) na eleição.\n\n⚖️ Aceitar custa **-5 karma**.\nReaja ✅ pra aceitar ou ❌ pra recusar (60s).`);
+  const sent = await msg.reply({ content: `<@${tid}>`, embeds: [e] }).catch(() => null);
+  if (!sent) return;
+  const ok = await awaitConfirm(sent, tid, 60000);
+  if (ok !== true) return sent.reply(ok === false ? `🛡️ <@${tid}> recusou o suborno.` : `⏰ Sem resposta.`).catch(() => {});
+  // Re-checa eleição e dinheiro
+  const e2 = await db.query.elections.findFirst({ where: eq(schema.elections.isActive, true) });
+  if (!e2 || e2.id !== election.id) return sent.reply("❌ Eleição encerrou.").catch(() => {});
+  const votesNow = { ...((e2.votes as Record<string, string>) ?? {}) };
+  if (votesNow[tid]) return sent.reply(`❌ <@${tid}> já tinha votado em <@${votesNow[tid]}>.`).catch(() => {});
+  votesNow[tid] = msg.author.id;
+  await db.update(schema.elections).set({ votes: votesNow }).where(eq(schema.elections.id, e2.id));
+  // Debita orçamento e credita o eleitor
+  const fresh = await getPlayer(msg.author.id);
+  if (fresh) {
+    const inv = { ...(fresh.inventory ?? {}) };
+    inv["_orcamento_politico"] = Math.max(0, ((inv["_orcamento_politico"] as number) ?? 0) - v);
+    await updatePlayer(msg.author.id, { inventory: inv });
+  }
+  await addMoney(tid, v);
+  const target = await getPlayer(tid);
+  if (target) await updatePlayer(tid, { karma: (target.karma ?? 0) - 5 });
+  await logTransaction(msg.author.id, tid, v, "vote_buy", `Compra de voto`);
+  return sent.reply(`💼 Suborno fechado! <@${tid}> recebeu ${formatMoney(v)} e votou em <@${msg.author.id}>. _(-5 karma)_`).catch(() => {});
 });
 
 reg(["proporlei", "lei"], async (msg, args) => {
@@ -1567,9 +1842,7 @@ reg(["leis"], async (msg) => {
   return reply(msg, "📜 **Leis em vigor:**\n" + laws.map(l => `• **${l.name}** — ${l.description} _(por <@${l.proposedBy}>)_`).join("\n"));
 });
 
-// ============ RACHA DE CARROS ============
-const activeRaces = new Map<string, { challenger: string; bet: number; expires: number }>();
-
+// ============ RACHA DE CARROS (reactions) ============
 reg(["racha"], async (msg, args) => {
   const bet = intArg(args, 0);
   const tid = getMentionId(msg, args, 1) ?? (msg.mentions.users.first()?.id ?? null);
@@ -1599,87 +1872,61 @@ reg(["racha"], async (msg, args) => {
   const a = pickFastest(myCars);
   const b = pickFastest(tgCars);
 
-  // Confirm phase
-  const key = `${tid}:${msg.author.id}`;
-  activeRaces.set(key, { challenger: msg.author.id, bet, expires: Date.now() + 60000 });
-
-  const e = new EmbedBuilder().setTitle("🏁 Desafio de Racha!").setColor(0xff6600).setDescription(
+  // Convite com reação ✅/❌
+  const challengeEmbed = new EmbedBuilder().setTitle("🏁 Desafio de Racha!").setColor(0xff6600).setImage(GIFS.race).setDescription(
     `<@${msg.author.id}> desafiou <@${tid}> para um racha apostando **${formatMoney(bet)}** cada um.\n\n` +
     `🚗 ${a.car.model} — vel. máx ${a.speed} km/h (estado ${a.car.condition}%)\n` +
     `🚗 ${b.car.model} — vel. máx ${b.speed} km/h (estado ${b.car.condition}%)\n\n` +
-    `<@${tid}>, responda com \`!aceitarracha\` em até 60s ou \`!recusarracha\`.`,
+    `<@${tid}>, reaja ✅ pra aceitar ou ❌ pra recusar (60s).`,
   );
-  return reply(msg, { embeds: [e] });
-});
+  const sent = await msg.reply({ content: `<@${tid}>`, embeds: [challengeEmbed] }).catch(() => null);
+  if (!sent) return;
+  const ok = await awaitConfirm(sent, tid, 60000);
+  if (ok !== true) return sent.reply(ok === false ? `🚫 <@${tid}> recusou o desafio.` : `⏰ <@${tid}> não respondeu.`).catch(() => {});
 
-reg(["aceitarracha"], async (msg) => {
-  // find any active race targeting this user
-  let entry: { key: string; challenger: string; bet: number } | null = null;
-  for (const [key, r] of activeRaces.entries()) {
-    if (key.startsWith(`${msg.author.id}:`) && r.expires > Date.now()) {
-      entry = { key, challenger: r.challenger, bet: r.bet };
-      break;
-    }
-  }
-  if (!entry) return reply(msg, "❌ Sem desafios pendentes.");
-  activeRaces.delete(entry.key);
+  // Re-checa saldos
+  const ch2 = await getPlayer(msg.author.id);
+  const me2 = await getPlayer(tid);
+  if (!ch2 || !me2 || ch2.balance < bet || me2.balance < bet) return sent.reply("❌ Um dos dois ficou sem grana suficiente.").catch(() => {});
 
-  const challenger = await getPlayer(entry.challenger);
-  const me = await getOrCreatePlayer(msg.author.id, msg.author.username);
-  if (!challenger) return reply(msg, "❌ Desafiante sumiu.");
-  if (challenger.balance < entry.bet || me.balance < entry.bet) return reply(msg, "❌ Um dos dois ficou sem grana suficiente.");
-
-  const aCars = await db.query.cars.findMany({ where: eq(schema.cars.ownerId, challenger.discordId) });
-  const bCars = await db.query.cars.findMany({ where: eq(schema.cars.ownerId, me.discordId) });
-  if (aCars.length === 0 || bCars.length === 0) return reply(msg, "❌ Algum dos dois ficou sem carro.");
-
-  const pickFastest = (cars: typeof aCars) => {
-    let best = cars[0];
-    let bestSpeed = topSpeedFor(best.category, best.condition);
-    for (const c of cars) {
-      const sp = topSpeedFor(c.category, c.condition);
-      if (sp > bestSpeed) { best = c; bestSpeed = sp; }
-    }
-    return { car: best, speed: bestSpeed };
-  };
-
-  const a = pickFastest(aCars);
-  const b = pickFastest(bCars);
-
-  // Race simulation: each "tick" each car advances by speed * (0.7 + random*0.6); first to 1500 wins
+  // Simulação
   const TARGET = 1500;
   let posA = 0, posB = 0;
-  const ticks: string[] = [];
   for (let i = 0; i < 30; i++) {
     posA += a.speed * (0.7 + Math.random() * 0.6) * 0.05;
     posB += b.speed * (0.7 + Math.random() * 0.6) * 0.05;
     if (posA >= TARGET || posB >= TARGET) break;
   }
   const winnerIsA = posA >= posB;
-  const winnerId = winnerIsA ? challenger.discordId : me.discordId;
-  const loserId = winnerIsA ? me.discordId : challenger.discordId;
+  const winnerId = winnerIsA ? msg.author.id : tid;
+  const loserId = winnerIsA ? tid : msg.author.id;
 
-  await removeMoney(loserId, entry.bet);
-  await addMoney(winnerId, entry.bet);
-  await logTransaction(loserId, winnerId, entry.bet, "race", "Aposta de racha");
-
-  // Slight wear & tear on both cars
+  await removeMoney(loserId, bet);
+  await addMoney(winnerId, bet);
+  await logTransaction(loserId, winnerId, bet, "race", "Aposta de racha");
   await db.update(schema.cars).set({ condition: Math.max(10, a.car.condition - 5) }).where(eq(schema.cars.id, a.car.id));
   await db.update(schema.cars).set({ condition: Math.max(10, b.car.condition - 5) }).where(eq(schema.cars.id, b.car.id));
 
-  const e = new EmbedBuilder().setTitle("🏁 Resultado do Racha").setColor(0xff6600).setDescription(
-    `🚗 ${a.car.model}: ${bar(Math.min(TARGET, posA), TARGET, 12)}\n` +
-    `🚗 ${b.car.model}: ${bar(Math.min(TARGET, posB), TARGET, 12)}\n\n` +
-    `🏆 Vencedor: <@${winnerId}> +${formatMoney(entry.bet)}\n💸 Perdedor: <@${loserId}> -${formatMoney(entry.bet)}\n\n_Carros sofreram desgaste de 5% — usem \`!consertar\`._`,
-  );
-  return reply(msg, { embeds: [e] });
+  // Animação multi-frame
+  const frame = (pa: number, pb: number, title: string) => ({
+    title, color: 0xff6600, image: GIFS.race,
+    content: `🚗 <@${msg.author.id}> ${a.car.model}: ${bar(Math.min(TARGET, pa), TARGET, 14)}\n🚗 <@${tid}> ${b.car.model}: ${bar(Math.min(TARGET, pb), TARGET, 14)}`,
+  });
+  await animate(sent as any, [
+    frame(posA * 0.25, posB * 0.25, "🏁 3... 2... 1... GO!"),
+    frame(posA * 0.5, posB * 0.5, "💨 Acelerando..."),
+    frame(posA * 0.8, posB * 0.8, "🔥 Reta final!"),
+    {
+      title: "🏆 Resultado do Racha",
+      image: GIFS.race,
+      color: 0xff6600,
+      content: `🚗 ${a.car.model}: ${bar(Math.min(TARGET, posA), TARGET, 14)}\n🚗 ${b.car.model}: ${bar(Math.min(TARGET, posB), TARGET, 14)}\n\n🏆 <@${winnerId}> venceu e levou **${formatMoney(bet)}**!\n💸 <@${loserId}> perdeu **${formatMoney(bet)}**.\n_Carros sofreram desgaste de 5%._`,
+    },
+  ], 1000);
 });
 
-reg(["recusarracha"], async (msg) => {
-  for (const [key] of activeRaces.entries()) {
-    if (key.startsWith(`${msg.author.id}:`)) { activeRaces.delete(key); return reply(msg, "🚫 Desafio recusado."); }
-  }
-  return reply(msg, "❌ Sem desafios pendentes.");
+reg(["aceitarracha", "recusarracha"], async (msg) => {
+  return reply(msg, "ℹ️ Agora basta **reagir** com ✅ ou ❌ na mensagem do desafio. Sem comandos extras.");
 });
 
 // ============ EMPRESA — PREFIXO ! (apenas empresários certificados) ============
@@ -1911,41 +2158,6 @@ reg(["lavar", "lavagem"], async (msg, args) => {
   return reply(msg, `🧼 Lavagem bem sucedida via **${c.name}**! Recebeu ${formatMoney(limpo)} (80%) limpo.\n_Karma -5 · Ficha intocada._`);
 });
 
-// ============ ANIMAÇÃO DE PLANTAR (visual extra) ============
-reg(["plantaranim"], async (msg, args) => {
-  const seed = args[0]?.toLowerCase();
-  if (!seed) return reply(msg, "❌ Uso: `!plantaranim <semente>` (mesmo que !plantar mas com animação).");
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
-  const inv = { ...(p.inventory ?? {}) };
-  if (!inv[seed] || inv[seed]! <= 0) return reply(msg, "❌ Você não tem essa semente.");
-  const item = (SHOP_ITEMS as any)[seed];
-  if (!item || item.type !== "seed") return reply(msg, "❌ Item não é semente.");
-  const crop = CROPS[item.cropKey!]!;
-  let minutes = crop.growMinutes;
-  if (inv["fertilizante"] && inv["fertilizante"]! > 0) {
-    minutes = Math.floor(minutes * 0.6);
-    inv["fertilizante"]! -= 1;
-  }
-  inv[seed]! -= 1;
-  const ready = new Date(Date.now() + minutes * 60 * 1000);
-  await db.insert(schema.plots).values({ ownerId: p.discordId, crop: item.cropKey!, readyAt: ready });
-  await updatePlayer(p.discordId, { inventory: inv });
-
-  const sent = await msg.reply(`🌍 Preparando o solo...`).catch(() => null);
-  if (!sent) return;
-  const frames = [
-    `🪨 Removendo pedras... \`${bar(1, 5)}\``,
-    `🚜 Arando o terreno... \`${bar(2, 5)}\``,
-    `💧 Regando... \`${bar(3, 5)}\``,
-    `🌱 Plantando ${crop.emoji} ${crop.name}... \`${bar(4, 5)}\``,
-    `✅ Pronto! ${crop.emoji} **${crop.name}** plantado! Estará pronto em ${minutes} min.`,
-  ];
-  for (const f of frames) {
-    await new Promise(r => setTimeout(r, 700));
-    await sent.edit(f).catch(() => {});
-  }
-});
-
 // ============ TOP / HELP ============
 reg(["top", "ranking"], async (msg) => {
   const top = await db.query.players.findMany({ orderBy: [desc(schema.players.balance)], limit: 10 });
@@ -1960,11 +2172,12 @@ reg(["ajuda", "help", "comandos"], async (msg) => {
       { name: "🎁 Recompensas", value: "`!day` `!week` `!bonus`" },
       { name: "🛒 Loja", value: "`!loja` `!comprar <item> [qtd]` `!inv`" },
       { name: "🪪 Personagem", value: "`!perfil <UF> <cidade> <gen> <pol>` `!rg [@user]`" },
-      { name: "👔 Profissão", value: "`!profs` `!curso <nome>` `!treinar` `!sal`" },
+      { name: "👔 Profissão", value: "`!profs` (escala social) · `!curso <nome>` (escolhe sem custo se tiver nível) · `!sal` (a cada 8h)" },
       { name: "❤️ Saúde", value: "`!saude` `!hospital` `!seguro` `!curar @user` `!defender @user`" },
       { name: "🦹 Crime", value: "`!crime <tipo>` `!roubar @user` `!ficha` `!prender @user [min]` `!fugir`" },
-      { name: "🌾 Fazenda Vegetal", value: "`!plantar <semente>` `!plant` `!colher`" },
+      { name: "🌾 Fazenda Vegetal", value: "`!plantar <semente>` `!plant` `!colher` (com animação)" },
       { name: "🐄 Fazenda Animal", value: "`!fazenda` `!animal <esp> [nome]` `!alimentar <id>` `!abater <id>`" },
+      { name: "🪴 Slots da Fazenda", value: "`!comprarslot planta` · `!comprarslot animal` (limita plantios/animais simultâneos)" },
     );
   const e2 = new EmbedBuilder().setColor(0x5865f2).addFields(
       { name: "🎰 Cassino", value: "`!slot <v>` `!roleta <cor> <v>` `!dado <esc> <v> [n]` `!bicho <1-25> <v>`" },
@@ -1981,7 +2194,7 @@ reg(["ajuda", "help", "comandos"], async (msg) => {
       { name: "📜 Dívidas/Crédito", value: "`!fiado @user <v> [dias]` `!dividas` `!pagar <id>`" },
       { name: "⚖️ Falência", value: "`!falir` `!status` `!checkfalencia`" },
       { name: "⭐ Reputação/Karma", value: "`!rep [@user]`" },
-      { name: "🤔 Escolhas Morais", value: "`!moral` (responda 1, 2 ou 3)" },
+      { name: "🤔 Escolhas Morais", value: "`!moral` (reaja 1️⃣ 2️⃣ 3️⃣ na mensagem)" },
       { name: "🧾 Imposto", value: "`!ir` (paga IR semanal) · `!sonegar` (arriscado)" },
       { name: "🕶️ Mercado Negro", value: "`!mn` `!mncomprar <chave>` (precisa ficha criminal 3+)" },
       { name: "🎰 Loteria", value: "`!loteria` `!bilhete <1-100>` (sorteio diário automático)" },
@@ -1990,11 +2203,13 @@ reg(["ajuda", "help", "comandos"], async (msg) => {
   const e4 = new EmbedBuilder().setColor(0xff6600).setTitle("📖 Comandos — Novos Sistemas").addFields(
       { name: "🎛️ Painel Geral", value: "`!dash` (visão completa do seu jogador)" },
       { name: "📈 Bolsa Detalhada", value: "`!cotacoes` (lista com variação %) · `!bdetalhe <SYM>` (detalhes)" },
-      { name: "🏛️ Política", value: "`!governo` `!leis` · admin: `!eleicao <presidente|prefeito>` · `!candidatar` `!votar @user` `!apurar` · `!proporlei <efeito> <nome>`" },
-      { name: "🏁 Racha de Carros", value: "`!racha <valor> @user` → `!aceitarracha` ou `!recusarracha`" },
+      { name: "🏛️ Política", value: "`!governo` `!leis` · admin: `!eleicao <presidente|prefeito>` · `!candidatar` `!votar @user` `!apurar` · `!proporlei <efeito> <nome>` · `!comprarvoto @user <v>` (gasta orçamento político)" },
+      { name: "🏁 Racha de Carros", value: "`!racha <valor> @user` (alvo reage com ✅/❌; corrida animada)" },
+      { name: "💍 Casamento", value: "`!casar @user` (taxa R$ 10.000, alvo reage ✅/❌)" },
+      { name: "🏴 Convite de Gangue", value: "`!ginvitar @user` (alvo reage ✅/❌ na mensagem)" },
       { name: "💼 Empresa (só Empresário formado)", value: "`!empresa` `!ecriar \"<nome>\" <setor> <desc>` `!econtratar @user` `!edemitir @user` `!epagar` `!eanunciar` `!eexpandir` `!eipo <SYM> <preço>` `!esimular` `!elista`" },
       { name: "🧼 Lavagem (crime+empresa)", value: "`!lavar <valor>` (precisa empresa + ficha criminal)" },
-      { name: "🌱 Plantio Animado", value: "`!plantaranim <semente>` (com animação visual)" },
+      { name: "✨ Nível & Animações", value: "`!work` (XP por turno, sobe níveis 0→15+) · plantar/colher/animal/racha agora têm animação com GIF" },
     );
   return msg.reply({ embeds: [e1, e2, e3, e4] }).catch(() => {});
 });

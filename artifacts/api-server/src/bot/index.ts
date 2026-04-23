@@ -30,8 +30,9 @@ export async function startBot() {
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent, // PRIVILEGED — habilite no Discord Developer Portal
+      GatewayIntentBits.GuildMessageReactions,
     ],
-    partials: [Partials.Channel, Partials.Message],
+    partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
   });
 
   client.once("clientReady", (c) => {
