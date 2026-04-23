@@ -1,18 +1,34 @@
 import { REST, Routes } from "discord.js";
 import { commands as economiaCommands } from "./commands/economia.js";
+import { commands as profissaoCommands } from "./commands/profissao.js";
+import { commands as crimeCommands } from "./commands/crime.js";
+import { commands as ganguesCommands } from "./commands/gangues.js";
+import { commands as politicaCommands } from "./commands/politica.js";
+import { commands as saudeCommands } from "./commands/saude.js";
+import { commands as bolsaCommands } from "./commands/bolsa.js";
+import { commands as empresaCommands } from "./commands/empresa.js";
 import { commands as adminCommands } from "./commands/admin.js";
 import { commands as ajudaCommands } from "./commands/ajuda.js";
 import { commands as lojaCommands } from "./commands/loja.js";
+import { commands as plantacaoCommands } from "./commands/plantacao.js";
 import { commands as recompensasCommands } from "./commands/recompensas.js";
-import { commands as rgCommands } from "./commands/rg.js";
+import { commands as cassinoCommands } from "./commands/cassino.js";
 
 const allCommands = [
   ...economiaCommands,
+  ...profissaoCommands,
+  ...crimeCommands,
+  ...ganguesCommands,
+  ...politicaCommands,
+  ...saudeCommands,
+  ...bolsaCommands,
+  ...empresaCommands,
   ...adminCommands,
   ...ajudaCommands,
   ...lojaCommands,
+  ...plantacaoCommands,
   ...recompensasCommands,
-  ...rgCommands,
+  ...cassinoCommands,
 ].map(c => c.data.toJSON());
 
 function extractAppIdFromToken(token: string): string {
@@ -31,6 +47,7 @@ export async function deployCommands() {
 
   let clientId = process.env.DISCORD_CLIENT_ID ?? "";
 
+  // Auto-extract application ID from token if the CLIENT_ID looks like a token
   if (!clientId || clientId.includes(".")) {
     try {
       clientId = extractAppIdFromToken(token);
