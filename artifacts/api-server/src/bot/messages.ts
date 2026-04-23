@@ -2158,6 +2158,278 @@ reg(["lavar", "lavagem"], async (msg, args) => {
   return reply(msg, `🧼 Lavagem bem sucedida via **${c.name}**! Recebeu ${formatMoney(limpo)} (80%) limpo.\n_Karma -5 · Ficha intocada._`);
 });
 
+// ============ IMPEACHMENT ============
+reg(["impeachment", "impeach"], async (msg, args) => {
+  const target = (args[0] ?? "").toLowerCase();
+  if (target !== "presidente" && target !== "prefeito") {
+    return reply(msg, "❌ Uso: `!impeachment <presidente|prefeito>`");
+  }
+  const gov = await getGovernment();
+  const officerId = target === "presidente" ? gov.presidentId : gov.mayorId;
+  if (!officerId) return reply(msg, `❌ Não há ${target} no momento.`);
+  if (officerId === msg.author.id) return reply(msg, "❌ Você não pode pedir o próprio impeachment.");
+
+  const sent = await msg.channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle("⚖️ PEDIDO DE IMPEACHMENT")
+        .setColor(0xaa0000)
+        .setDescription(
+          `<@${msg.author.id}> abriu impeachment contra <@${officerId}> (**${target}**).\n` +
+          `Reaja ✅ em **90 segundos** — precisamos de **5 apoiadores** (sem contar o autor).\n\n` +
+          `Se aprovado, o orçamento político restante é confiscado e dividido entre os apoiadores.`
+        )
+        .setImage(GIFS.vote),
+    ],
+  }).catch(() => null);
+  if (!sent) return;
+  await sent.react("✅").catch(() => {});
+
+  try {
+    await sent.awaitReactions({
+      filter: (r: any, u: any) => r.emoji.name === "✅" && !u.bot,
+      time: 90_000,
+    });
+  } catch {}
+
+  const fresh = await sent.fetch().catch(() => null);
+  const reaction = fresh?.reactions.cache.get("✅");
+  let supporters: string[] = [];
+  if (reaction) {
+    const users = await reaction.users.fetch().catch(() => null);
+    supporters = users
+      ? Array.from(users.values()).filter((u: any) => !u.bot && u.id !== msg.author.id && u.id !== officerId).map((u: any) => u.id)
+      : [];
+  }
+
+  if (supporters.length < 5) {
+    return msg.channel.send(`❌ Impeachment falhou: ${supporters.length}/5 apoiadores.`).catch(() => {});
+  }
+
+  // Remove from government
+  if (target === "presidente") {
+    await db.update(schema.government).set({ presidentId: null }).where(eq(schema.government.id, 1));
+  } else {
+    await db.update(schema.government).set({ mayorId: null }).where(eq(schema.government.id, 1));
+  }
+
+  // Confiscate political budget
+  const officer = await getPlayer(officerId);
+  const inv: any = { ...((officer?.inventory as any) ?? {}) };
+  const orc = (inv._orcamento_politico as number) ?? 0;
+  inv._orcamento_politico = 0;
+  if (officer) await updatePlayer(officerId, { inventory: inv });
+
+  const all = [msg.author.id, ...supporters];
+  const share = Math.floor(orc / all.length);
+  if (share > 0) for (const id of all) await addMoney(id, share);
+
+  return msg.channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle("⚖️ IMPEACHMENT APROVADO")
+        .setColor(0xaa0000)
+        .setDescription(
+          `<@${officerId}> foi removido(a) do cargo de **${target}**.\n` +
+          `💰 Orçamento confiscado: **${formatMoney(orc)}**\n` +
+          `👥 Distribuído entre ${all.length} apoiadores: **${formatMoney(share)}** cada.`
+        )
+        .setImage(GIFS.vote),
+    ],
+  }).catch(() => {});
+});
+
+// ============ PRODUTOS DA EMPRESA ============
+type Produto = { id: number; nome: string; preco: number; custo: number; vendidos: number };
+
+reg(["eproduto", "produto", "produtos"], async (msg, args) => {
+  const sub = (args[0] ?? "").toLowerCase();
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+
+  if (sub === "add" || sub === "criar" || sub === "novo") {
+    const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+    if (!c) return reply(msg, "❌ Você não tem empresa.");
+    // Aceita: !eproduto add "<nome com espaço>" <preco> <custo>
+    let nome = args[1];
+    let preco = intArg(args, 2);
+    let custo = intArg(args, 3);
+    const raw = msg.content.slice(msg.content.indexOf(args[0]) + args[0].length).trim();
+    const m = raw.match(/^"([^"]+)"\s+(\d+)\s+(\d+)/);
+    if (m) {
+      nome = m[1];
+      preco = parseInt(m[2], 10);
+      custo = parseInt(m[3], 10);
+    }
+    if (!nome || !preco || custo === null || custo === undefined) {
+      return reply(msg, '❌ Uso: `!eproduto add "<nome>" <preço> <custo>`');
+    }
+    if (custo >= preco) return reply(msg, "❌ O custo precisa ser menor que o preço.");
+    const inv: any = { ...(p.inventory ?? {}) };
+    const list: Produto[] = (inv._produtos as Produto[]) ?? [];
+    if (list.length >= 5) return reply(msg, "❌ Limite de 5 produtos por empresa.");
+    const id = (list.reduce((m, x) => Math.max(m, x.id), 0) || 0) + 1;
+    list.push({ id, nome, preco, custo, vendidos: 0 });
+    inv._produtos = list;
+    await updatePlayer(p.discordId, { inventory: inv });
+    return reply(msg, `✅ Produto \`${id}\` **${nome}** criado — ${formatMoney(preco)} (custo ${formatMoney(custo)}).`);
+  }
+
+  if (sub === "rm" || sub === "remover" || sub === "del") {
+    const id = intArg(args, 1);
+    if (!id) return reply(msg, "❌ Uso: `!eproduto rm <id>`");
+    const inv: any = { ...(p.inventory ?? {}) };
+    const list: Produto[] = (inv._produtos as Produto[]) ?? [];
+    inv._produtos = list.filter(x => x.id !== id);
+    await updatePlayer(p.discordId, { inventory: inv });
+    return reply(msg, `🗑️ Produto removido.`);
+  }
+
+  // Lista (default ou "lista")
+  const tid = getMentionId(msg, args, sub === "lista" ? 1 : 0) ?? p.discordId;
+  const owner = await getPlayer(tid);
+  if (!owner) return reply(msg, "❌ Dono inválido.");
+  const oc = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, tid) });
+  if (!oc) return reply(msg, "❌ Esse usuário não tem empresa.");
+  const list: Produto[] = ((owner.inventory as any)?._produtos as Produto[]) ?? [];
+  if (list.length === 0) return reply(msg, `📦 **${oc.name}** não cadastrou produtos. Dono use \`!eproduto add\`.`);
+  const e = new EmbedBuilder()
+    .setTitle(`📦 Produtos — ${oc.name}`)
+    .setColor(0x004488)
+    .setDescription(
+      list.map(x => `\`${x.id}\` **${x.nome}** — ${formatMoney(x.preco)} _(custo ${formatMoney(x.custo)} · vendidos ${x.vendidos})_`).join("\n")
+    )
+    .setFooter({ text: `Comprar: !ecomprar @${owner.username} <id> [qtd]` });
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["ecomprar", "comprarprod"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  const pid = intArg(args, 1);
+  const qtd = Math.max(1, intArg(args, 2) ?? 1);
+  if (!tid || !pid) return reply(msg, "❌ Uso: `!ecomprar @dono <produto_id> [qtd]`");
+  if (tid === msg.author.id) return reply(msg, "❌ Não dá pra comprar de si mesmo.");
+
+  const buyer = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const owner = await getPlayer(tid);
+  if (!owner) return reply(msg, "❌ Dono inválido.");
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, tid) });
+  if (!c) return reply(msg, "❌ Esse usuário não tem empresa.");
+  const oinv: any = { ...(owner.inventory ?? {}) };
+  const list: Produto[] = (oinv._produtos as Produto[]) ?? [];
+  const prod = list.find(x => x.id === pid);
+  if (!prod) return reply(msg, "❌ Produto não existe.");
+  const total = prod.preco * qtd;
+  if (buyer.balance < total) return reply(msg, `❌ Faltam ${formatMoney(total - buyer.balance)}.`);
+
+  const employees: string[] = (c.employees as string[]) ?? [];
+  const now = Date.now();
+  const dia = 24 * 60 * 60 * 1000;
+  const activeWorkers: string[] = [];
+  for (const eid of employees) {
+    const e = await getPlayer(eid);
+    const t = ((e?.inventory as any)?._worked_at?.[c.id]) ?? 0;
+    if (now - t < dia) activeWorkers.push(eid);
+  }
+
+  await removeMoney(buyer.discordId, total);
+  const lucro = (prod.preco - prod.custo) * qtd;
+  const tax = Math.floor(total * 0.10);
+  const workerPool = activeWorkers.length > 0 ? Math.floor(lucro * 0.30) : 0;
+  const ownerNet = total - tax - workerPool;
+
+  await addMoney(tid, ownerNet);
+  if (workerPool > 0 && activeWorkers.length > 0) {
+    const each = Math.floor(workerPool / activeWorkers.length);
+    for (const wid of activeWorkers) await addMoney(wid, each);
+  }
+
+  // Atualiza produto + extrato do dono
+  prod.vendidos += qtd;
+  oinv._produtos = list;
+  oinv._extrato = oinv._extrato ?? { revenue: 0, lucro: 0, tax: 0, workers: 0, since: now };
+  if (now - (oinv._extrato.since ?? 0) > 7 * dia) oinv._extrato = { revenue: 0, lucro: 0, tax: 0, workers: 0, since: now };
+  oinv._extrato.revenue += total;
+  oinv._extrato.lucro += lucro;
+  oinv._extrato.tax += tax;
+  oinv._extrato.workers += workerPool;
+  await updatePlayer(tid, { inventory: oinv });
+
+  await db.update(schema.companies).set({
+    revenue: c.revenue + total,
+    expenses: c.expenses + (prod.custo * qtd) + tax,
+  }).where(eq(schema.companies.id, c.id));
+
+  await logTransaction(buyer.discordId, tid, total, "purchase", `${qtd}× ${prod.nome} (${c.name})`);
+
+  const breakdown =
+    `🛒 ${qtd}× **${prod.nome}** — ${formatMoney(total)}\n` +
+    `→ 🏢 Dono: ${formatMoney(ownerNet)}\n` +
+    `→ 🧾 Imposto: ${formatMoney(tax)}\n` +
+    `→ 👷 ${activeWorkers.length} func. ativo(s): ${formatMoney(workerPool)}` +
+    (activeWorkers.length === 0 ? " _(ninguém bateu ponto)_" : "");
+  return reply(msg, breakdown);
+});
+
+reg(["etrabalhar", "bater", "ponto"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const all = await db.query.companies.findMany();
+  const employer = all.find(c => ((c.employees as string[]) ?? []).includes(p.discordId));
+  if (!employer) return reply(msg, "❌ Você não trabalha em empresa nenhuma. Peça para um empresário te contratar.");
+  const inv: any = { ...(p.inventory ?? {}) };
+  inv._worked_at = inv._worked_at ?? {};
+  const last = (inv._worked_at[employer.id] as number) ?? 0;
+  const cd = 60 * 60 * 1000;
+  if (Date.now() - last < cd) {
+    return reply(msg, `⏳ Já bateu ponto. Próximo turno em ${formatCooldown(cd - (Date.now() - last))}.`);
+  }
+  inv._worked_at[employer.id] = Date.now();
+  inv._xp = ((inv._xp as number) ?? 0) + 8;
+  await updatePlayer(p.discordId, { inventory: inv });
+  await db.update(schema.companies).set({ reputation: Math.min(100, employer.reputation + 1) }).where(eq(schema.companies.id, employer.id));
+  return animate(msg, [
+    { title: "🛠️ Bateu o ponto", color: 0x004488, content: `Trabalhando na **${employer.name}**…`, image: GIFS.work },
+    { title: "✅ Turno registrado", color: 0x00aa44, content: `Você é **funcionário ativo** por 24h.\nQuando alguém comprar produtos da **${employer.name}**, você ganha comissão automaticamente.\n+8 XP · +1 reputação da empresa.` },
+  ], 800);
+});
+
+reg(["eextrato", "extrato"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Sem empresa.");
+  const inv: any = p.inventory ?? {};
+  const ext = inv._extrato ?? { revenue: 0, lucro: 0, tax: 0, workers: 0, since: Date.now() };
+  const employees: string[] = (c.employees as string[]) ?? [];
+  const now = Date.now();
+  const dia = 24 * 60 * 60 * 1000;
+  const empLines: string[] = [];
+  for (const eid of employees) {
+    const e = await getPlayer(eid);
+    const last = ((e?.inventory as any)?._worked_at?.[c.id]) ?? 0;
+    const ativo = now - last < dia;
+    empLines.push(`${ativo ? "🟢" : "🔴"} <@${eid}> — ${ativo ? `ativo (${formatCooldown(dia - (now - last))} restantes)` : "ausente"}`);
+  }
+  const produtos: Produto[] = (inv._produtos as Produto[]) ?? [];
+  const prodLines = produtos.length === 0
+    ? "_Nenhum produto cadastrado. Use `!eproduto add`._"
+    : produtos.map(x => `\`${x.id}\` **${x.nome}** — ${formatMoney(x.preco)} · vendidos: ${x.vendidos}`).join("\n");
+
+  const lucroTotal = c.revenue - c.expenses;
+  const dias = Math.max(1, Math.floor((now - (ext.since ?? now)) / dia));
+  const e = new EmbedBuilder()
+    .setTitle(`📊 Extrato — ${c.name}`)
+    .setColor(lucroTotal >= 0 ? 0x00aa44 : 0xaa2222)
+    .addFields(
+      { name: "💰 Receita histórica", value: formatMoney(c.revenue), inline: true },
+      { name: "💸 Despesas históricas", value: formatMoney(c.expenses), inline: true },
+      { name: lucroTotal >= 0 ? "📈 Lucro acumulado" : "📉 Prejuízo", value: formatMoney(lucroTotal), inline: true },
+      { name: `🗓️ Janela atual (${dias}d)`, value: `Receita: ${formatMoney(ext.revenue)}\nLucro bruto: ${formatMoney(ext.lucro)}\nImpostos: ${formatMoney(ext.tax)}\nPago a funcionários: ${formatMoney(ext.workers)}`, inline: false },
+      { name: "📦 Produtos", value: prodLines, inline: false },
+      { name: `👥 Funcionários (${employees.length}/${c.level * 3})`, value: empLines.join("\n") || "_Nenhum_", inline: false },
+    )
+    .setFooter({ text: "Funcionários precisam usar !etrabalhar a cada 24h pra receber comissão." });
+  return reply(msg, { embeds: [e] });
+});
+
 // ============ TOP / HELP ============
 reg(["top", "ranking"], async (msg) => {
   const top = await db.query.players.findMany({ orderBy: [desc(schema.players.balance)], limit: 10 });
@@ -2207,7 +2479,10 @@ reg(["ajuda", "help", "comandos"], async (msg) => {
       { name: "🏁 Racha de Carros", value: "`!racha <valor> @user`" },
       { name: "💍 Casamento", value: "`!casar @user`" },
       { name: "🏴 Convite de Gangue", value: "`!ginvitar @user`" },
-      { name: "💼 Empresa", value: "`!empresa` `!ecriar \"<nome>\" <setor> <desc>` `!econtratar @user` `!edemitir @user` `!epagar` `!eanunciar` `!eexpandir` `!eipo <SYM> <preço>` `!esimular` `!elista`" },
+      { name: "💼 Empresa", value: "`!empresa` `!ecriar \"<nome>\" <setor> <desc>` `!econtratar @user` `!edemitir @user` `!epagar` `!eanunciar` `!eexpandir` `!eipo <SYM> <preço>` `!esimular` `!elista` `!eextrato`" },
+      { name: "📦 Produtos da Empresa", value: "`!eproduto add \"<nome>\" <preço> <custo>` · `!eproduto rm <id>` · `!eproduto lista [@dono]` · `!ecomprar @dono <id> [qtd]`" },
+      { name: "🛠️ Funcionário", value: "`!etrabalhar` (1h cd, ativa comissão por 24h)" },
+      { name: "⚖️ Impeachment", value: "`!impeachment <presidente|prefeito>` (5 apoiadores ✅ em 90s, confisca orçamento)" },
       { name: "🧼 Lavagem", value: "`!lavar <valor>`" },
       { name: "✨ Nível & Animações", value: "`!work` · plantar/colher/animal/racha" },
     );
