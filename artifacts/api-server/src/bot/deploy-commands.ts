@@ -1,70 +1,36 @@
 import { REST, Routes } from "discord.js";
-import { commands as economiaCommands } from "./commands/economia.js";
-import { commands as profissaoCommands } from "./commands/profissao.js";
-import { commands as crimeCommands } from "./commands/crime.js";
-import { commands as ganguesCommands } from "./commands/gangues.js";
-import { commands as politicaCommands } from "./commands/politica.js";
-import { commands as saudeCommands } from "./commands/saude.js";
-import { commands as bolsaCommands } from "./commands/bolsa.js";
-import { commands as empresaCommands } from "./commands/empresa.js";
-import { commands as adminCommands } from "./commands/admin.js";
-import { commands as ajudaCommands } from "./commands/ajuda.js";
-import { commands as lojaCommands } from "./commands/loja.js";
-import { commands as plantacaoCommands } from "./commands/plantacao.js";
-import { commands as recompensasCommands } from "./commands/recompensas.js";
-import { commands as cassinoCommands } from "./commands/cassino.js";
+import { logger } from "../lib/logger.js";
 
-const allCommands = [
-  ...economiaCommands,
-  ...profissaoCommands,
-  ...crimeCommands,
-  ...ganguesCommands,
-  ...politicaCommands,
-  ...saudeCommands,
-  ...bolsaCommands,
-  ...empresaCommands,
-  ...adminCommands,
-  ...ajudaCommands,
-  ...lojaCommands,
-  ...plantacaoCommands,
-  ...recompensasCommands,
-  ...cassinoCommands,
-].map(c => c.data.toJSON());
-
-function extractAppIdFromToken(token: string): string {
-  const firstPart = token.split(".")[0];
-  if (!firstPart) throw new Error("Invalid token format");
-  return Buffer.from(firstPart, "base64").toString("utf-8");
-}
-
-export async function deployCommands() {
+/**
+ * Apaga TODOS os slash commands (globais e por guild) que estavam registrados.
+ * O bot agora usa apenas prefixo "!".
+ */
+export async function clearSlashCommands() {
   const token = process.env.DISCORD_TOKEN;
-
-  if (!token) {
-    console.warn("⚠️ DISCORD_TOKEN missing, skipping command deploy.");
+  const clientId = process.env.DISCORD_CLIENT_ID;
+  if (!token || !clientId) {
+    logger.warn("DISCORD_TOKEN ou DISCORD_CLIENT_ID não configurados — pulando limpeza de slash.");
     return;
   }
 
-  let clientId = process.env.DISCORD_CLIENT_ID ?? "";
-
-  // Auto-extract application ID from token if the CLIENT_ID looks like a token
-  if (!clientId || clientId.includes(".")) {
-    try {
-      clientId = extractAppIdFromToken(token);
-      console.log(`🔧 Auto-extracted Application ID from token: ${clientId}`);
-    } catch {
-      console.warn("⚠️ Could not extract Application ID from token.");
-      return;
-    }
-  }
-
-  const rest = new REST().setToken(token);
+  const rest = new REST({ version: "10" }).setToken(token);
 
   try {
-    console.log(`🔄 Deploying ${allCommands.length} slash commands...`);
-    await rest.put(Routes.applicationCommands(clientId), { body: allCommands });
-    console.log(`✅ ${allCommands.length} slash commands deployed successfully!`);
+    // Limpa globais
+    await rest.put(Routes.applicationCommands(clientId), { body: [] });
+    logger.info("🧹 Slash commands globais apagados.");
+
+    // Limpa também por guild se DISCORD_GUILD_ID(s) estiver definido
+    const guildIds = (process.env.DISCORD_GUILD_ID ?? process.env.DISCORD_GUILD_IDS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    for (const gid of guildIds) {
+      await rest.put(Routes.applicationGuildCommands(clientId, gid), { body: [] });
+      logger.info(`🧹 Slash commands da guild ${gid} apagados.`);
+    }
   } catch (err) {
-    console.error("❌ Failed to deploy commands:", err);
+    logger.error({ err }, "Falha ao limpar slash commands");
   }
 }

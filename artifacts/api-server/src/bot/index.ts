@@ -4,6 +4,7 @@ import { startWorldEngine } from "./systems/worldEvents.js";
 import { startRadio } from "./systems/radio.js";
 import { ensureSeason, startSeasonChecker } from "./systems/seasons.js";
 import { seedDatabase } from "./systems/seed.js";
+import { clearSlashCommands } from "./deploy-commands.js";
 import { logger } from "../lib/logger.js";
 
 const RADIO_CHANNEL_ID = "1496352320194220113";
@@ -17,6 +18,7 @@ export async function startBot() {
     return;
   }
 
+  await clearSlashCommands();
   await seedDatabase();
   await ensureSeason();
 
