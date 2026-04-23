@@ -24,4 +24,4 @@ RUN NODE_ENV=development pnpm install --no-frozen-lockfile --ignore-scripts
 
 RUN pnpm run build
 
-CMD ["sh", "-c", "pnpm run db:push || echo '[warn] db:push falhou, continuando...' && node index.mjs"]
+CMD ["sh", "-c", "(pnpm run db:push || echo '[warn] db:push falhou, continuando...') && pnpm --filter @workspace/api-server run start"]
