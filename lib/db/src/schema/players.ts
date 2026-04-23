@@ -46,6 +46,11 @@ export const players = pgTable("players", {
   partnerId: text("partner_id"),
   marriedAt: timestamp("married_at"),
   rgCreatedAt: timestamp("rg_created_at"),
+  bankrupt: boolean("bankrupt").notNull().default(false),
+  bankruptUntil: timestamp("bankrupt_until"),
+  lastTaxPaid: timestamp("last_tax_paid"),
+  karma: integer("karma").notNull().default(0),
+  lastMoral: timestamp("last_moral"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

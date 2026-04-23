@@ -49,6 +49,32 @@ export const debts = pgTable("debts", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
+export const lotteryDraws = pgTable("lottery_draws", {
+  id: serial("id").primaryKey(),
+  drawNumber: integer("draw_number").notNull(),
+  winningNumber: integer("winning_number"),
+  totalPot: bigint("total_pot", { mode: "number" }).notNull().default(0),
+  winnerId: text("winner_id"),
+  drawAt: timestamp("draw_at").notNull(),
+  drawnAt: timestamp("drawn_at"),
+});
+
+export const lotteryTickets = pgTable("lottery_tickets", {
+  id: serial("id").primaryKey(),
+  drawId: integer("draw_id").notNull(),
+  playerId: text("player_id").notNull(),
+  number: integer("number").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+export const economicEvents = pgTable("economic_events", {
+  id: serial("id").primaryKey(),
+  type: text("type").notNull(),
+  startedAt: timestamp("started_at").notNull().defaultNow(),
+  endsAt: timestamp("ends_at").notNull(),
+  active: boolean("active").notNull().default(true),
+});
+
 export const seasons = pgTable("seasons", {
   id: integer("id").primaryKey().default(1),
   number: integer("number").notNull().default(1),

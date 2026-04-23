@@ -28,6 +28,11 @@ import { SHOP_ITEMS, CROPS, WEAPONS, BR_STATES, POLITICAL_SIDES, GENDERS, PET_SP
 import { CAR_MODELS, depreciate, repairCost, MAINTENANCE_INTERVAL_MS } from "./systems/cars.js";
 import { HOUSE_TYPES, HOUSE_UPGRADES } from "./systems/houses.js";
 import { ANIMAL_SPECIES, HUNGER_DECAY_PER_HOUR } from "./systems/farmAnimals.js";
+import { createDebt, listDebts, payDebt, checkBankruptcy, declareBankruptcy, DEFAULT_INTEREST, DEFAULT_DUE_DAYS } from "./systems/debts.js";
+import { TICKET_PRICE, NUMBER_RANGE, getCurrentDraw, buyTicket } from "./systems/lottery.js";
+import { MORAL_SCENARIOS, pickRandomScenario } from "./systems/morality.js";
+import { BLACK_MARKET, MIN_RECORD_TO_ACCESS } from "./systems/blackmarket.js";
+import { EVENT_DEFS, type EventType, getActiveEvent, startEvent } from "./systems/economicEvents.js";
 import { logger } from "../lib/logger.js";
 
 const PREFIX = "!";
@@ -1071,6 +1076,258 @@ reg(["carteira"], async (msg) => {
   return reply(msg, lines.join("\n"));
 });
 
+// ============ DÍVIDAS / FIADO ============
+reg(["fiado", "emprestar"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  if (!tid) return reply(msg, "❌ Uso: `!fiado @user <valor> [dias]`");
+  const v = intArg(args, 1) ?? intArg(args, 2);
+  if (!v) return reply(msg, "❌ Informe um valor válido.");
+  if (tid === msg.author.id) return reply(msg, "❌ Você não pode emprestar pra si mesmo.");
+  const days = parseInt(args.find((a, i) => i > 0 && /^\d+$/.test(a) && parseInt(a, 10) <= 30 && parseInt(a, 10) !== v) ?? `${DEFAULT_DUE_DAYS}`, 10) || DEFAULT_DUE_DAYS;
+  const lender = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const debtor = await getPlayer(tid);
+  if (!debtor) return reply(msg, "❌ Devedor precisa interagir com o bot antes.");
+  if (lender.balance < v) return reply(msg, "❌ Você não tem essa grana.");
+  await updatePlayer(lender.discordId, { balance: lender.balance - v });
+  await addMoney(tid, v);
+  const debt = await createDebt(tid, lender.discordId, v, days);
+  return reply(msg, `🤝 Emprestou ${formatMoney(v)} para <@${tid}>.\n📜 Dívida #${debt.id} · juros ${(DEFAULT_INTEREST * 100).toFixed(0)}%/dia se atrasar · vence em ${days} dia(s).`);
+});
+
+reg(["dividas", "minhasdividas"], async (msg) => {
+  const ds = await listDebts(msg.author.id);
+  if (ds.length === 0) return reply(msg, "✅ Você não tem dívidas.");
+  const lines = ds.map(d => `#${d.id} · ${formatMoney(d.remainingAmount)} · vence ${d.dueAt.toLocaleDateString("pt-BR")} ${d.defaulted ? "🔴 EM ATRASO" : ""}`);
+  const total = ds.reduce((s, d) => s + d.remainingAmount, 0);
+  return reply(msg, `📜 **Dívidas** (total ${formatMoney(total)})\n${lines.join("\n")}\n\nUse \`!pagar <id>\` para quitar.`);
+});
+
+reg(["pagar", "quitar"], async (msg, args) => {
+  const id = intArg(args, 0);
+  if (!id) return reply(msg, "❌ Uso: `!pagar <id-da-divida>`");
+  const r = await payDebt(id, msg.author.id);
+  return reply(msg, r.ok ? `✅ ${r.msg}` : `❌ ${r.msg}`);
+});
+
+// ============ FALÊNCIA ============
+reg(["falir", "falencia"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (p.bankrupt) return reply(msg, `🔴 Você já está em falência até ${p.bankruptUntil?.toLocaleDateString("pt-BR")}.`);
+  const ds = await listDebts(msg.author.id);
+  const total = ds.reduce((s, d) => s + d.remainingAmount, 0);
+  if (total < 5000) return reply(msg, "❌ Falência só é permitida com dívidas acima de R$ 5.000.");
+  await declareBankruptcy(msg.author.id);
+  return reply(msg, `⚖️ **FALÊNCIA DECRETADA**\nVocê perdeu casa, carros e teve dívidas perdoadas.\n📉 -200 reputação · -30 karma\n🔒 Sem crédito por 7 dias.`);
+});
+
+reg(["status", "patrimonio"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const ds = await listDebts(msg.author.id);
+  const totalDebt = ds.reduce((s, d) => s + d.remainingAmount, 0);
+  const wealth = p.balance + p.bankBalance;
+  const e = new EmbedBuilder().setTitle(`📊 Patrimônio · ${p.username}`).setColor(p.bankrupt ? 0xff0000 : 0x00ff88).addFields(
+    { name: "💵 Carteira", value: formatMoney(p.balance), inline: true },
+    { name: "🏦 Banco", value: formatMoney(p.bankBalance), inline: true },
+    { name: "📜 Dívidas", value: formatMoney(totalDebt), inline: true },
+    { name: "💎 Líquido", value: formatMoney(wealth - totalDebt), inline: true },
+    { name: "⭐ Reputação", value: `${p.reputation}`, inline: true },
+    { name: "🧘 Karma", value: `${p.karma}`, inline: true },
+    { name: "📋 Status", value: p.bankrupt ? `🔴 FALIDO até ${p.bankruptUntil?.toLocaleDateString("pt-BR")}` : "✅ Saudável", inline: false },
+  );
+  return reply(msg, { embeds: [e] });
+});
+
+// ============ REPUTAÇÃO ============
+reg(["rep", "reputacao"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0) ?? msg.author.id;
+  const p = await getPlayer(tid);
+  if (!p) return reply(msg, "❌ Jogador sem ficha.");
+  let nivel = "Desconhecido";
+  if (p.reputation >= 200) nivel = "🌟 Lenda da Quebrada";
+  else if (p.reputation >= 100) nivel = "👑 Respeitado";
+  else if (p.reputation >= 50) nivel = "👍 Confiável";
+  else if (p.reputation >= 0) nivel = "😐 Neutro";
+  else if (p.reputation >= -50) nivel = "👎 Mal visto";
+  else if (p.reputation >= -100) nivel = "🤬 Caloteiro";
+  else nivel = "💀 Pária";
+  let karma = "Equilibrado";
+  if (p.karma >= 50) karma = "😇 Anjo";
+  else if (p.karma >= 20) karma = "✨ Bom";
+  else if (p.karma >= -20) karma = "⚖️ Equilibrado";
+  else if (p.karma >= -50) karma = "😈 Mau";
+  else karma = "👹 Demônio";
+  const e = new EmbedBuilder().setTitle(`⭐ ${p.username}`).setColor(0xffd700).addFields(
+    { name: "Reputação", value: `${p.reputation} · ${nivel}`, inline: true },
+    { name: "Karma", value: `${p.karma} · ${karma}`, inline: true },
+    { name: "Ficha criminal", value: `${p.criminalRecord} crimes`, inline: true },
+  );
+  return reply(msg, { embeds: [e] });
+});
+
+// ============ ESCOLHAS MORAIS ============
+reg(["moral", "escolha"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const cd = cooldownLeft(p.lastMoral, 60 * 60 * 1000);
+  if (cd > 0) return reply(msg, `⏳ Aguarde ${formatCooldown(cd)} pra outra escolha moral.`);
+  const sc = pickRandomScenario();
+  const optionsText = sc.options.map((o, i) => `**${i + 1}.** ${o.label}`).join("\n");
+  await reply(msg, `🤔 **Dilema Moral**\n\n${sc.scenario}\n\n${optionsText}\n\nResponda com o número (1, 2 ou 3) em até 30s.`);
+  const filter = (m: Message) => m.author.id === msg.author.id && /^[1-3]$/.test(m.content.trim());
+  const ch = msg.channel as TextChannel;
+  try {
+    const collected = await ch.awaitMessages?.({ filter, max: 1, time: 30000, errors: ["time"] });
+    const choiceMsg = collected?.first();
+    if (!choiceMsg) return reply(msg, "⏰ Tempo esgotado. Você ficou paralisado.");
+    const idx = parseInt(choiceMsg.content.trim(), 10) - 1;
+    const opt = sc.options[idx];
+    if (!opt) return;
+    const fresh = await getPlayer(msg.author.id);
+    if (!fresh) return;
+    await updatePlayer(msg.author.id, {
+      balance: Math.max(0, fresh.balance + opt.money),
+      karma: fresh.karma + opt.karma,
+      reputation: fresh.reputation + opt.rep,
+      lastMoral: new Date(),
+    });
+    return reply(msg, `📜 ${opt.outcome}\n\n💰 ${opt.money >= 0 ? "+" : ""}${formatMoney(opt.money)} · 🧘 ${opt.karma >= 0 ? "+" : ""}${opt.karma} karma · ⭐ ${opt.rep >= 0 ? "+" : ""}${opt.rep} rep`);
+  } catch {
+    return reply(msg, "⏰ Tempo esgotado.");
+  }
+});
+
+// ============ IMPOSTO DE RENDA ============
+reg(["ir", "imposto"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const wealth = p.balance + p.bankBalance;
+  const eco = await getEconomy();
+  const taxRate = eco.incomeTaxRate;
+  const tax = Math.floor(wealth * taxRate);
+  if (tax <= 0) return reply(msg, "✅ Você não tem patrimônio tributável.");
+  const last = p.lastTaxPaid;
+  if (last && Date.now() - last.getTime() < 7 * 24 * 60 * 60 * 1000) {
+    return reply(msg, `✅ IR já pago. Próxima declaração em ${formatCooldown(7 * 24 * 60 * 60 * 1000 - (Date.now() - last.getTime()))}.`);
+  }
+  if (p.balance + p.bankBalance < tax) return reply(msg, `❌ Você precisa de ${formatMoney(tax)} pra pagar o IR.`);
+  // tira primeiro do banco
+  let fromBank = Math.min(tax, p.bankBalance);
+  let fromCash = tax - fromBank;
+  await updatePlayer(p.discordId, {
+    bankBalance: p.bankBalance - fromBank,
+    balance: p.balance - fromCash,
+    lastTaxPaid: new Date(),
+    karma: p.karma + 5,
+    reputation: p.reputation + 10,
+  });
+  await logTransaction(p.discordId, "GOV", tax, "tax", "Imposto de Renda");
+  return reply(msg, `🧾 **Imposto de Renda pago**\n💸 ${formatMoney(tax)} (${(taxRate * 100).toFixed(0)}% de ${formatMoney(wealth)})\n+5 karma · +10 reputação`);
+});
+
+reg(["sonegar"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const wealth = p.balance + p.bankBalance;
+  const eco = await getEconomy();
+  const tax = Math.floor(wealth * eco.incomeTaxRate);
+  if (tax <= 0) return reply(msg, "❌ Sem patrimônio pra sonegar.");
+  await updatePlayer(p.discordId, { lastTaxPaid: new Date(), karma: p.karma - 10 });
+  // 30% chance de fiscalização
+  if (Math.random() < 0.3) {
+    const penalty = Math.floor(tax * 1.5);
+    const total = Math.min(p.balance + p.bankBalance, penalty);
+    let fb = Math.min(total, p.bankBalance);
+    let fc = total - fb;
+    await updatePlayer(p.discordId, { bankBalance: p.bankBalance - fb, balance: p.balance - fc, reputation: p.reputation - 30 });
+    return reply(msg, `🚨 **FISCALIZAÇÃO!** Você foi pego sonegando.\n💸 Multa: ${formatMoney(total)}\n📉 -30 reputação`);
+  }
+  return reply(msg, `🤫 Você sonegou ${formatMoney(tax)} e não foi pego... dessa vez. -10 karma.`);
+});
+
+// ============ MERCADO NEGRO ============
+reg(["mn", "mercadonegro"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (p.criminalRecord < MIN_RECORD_TO_ACCESS) return reply(msg, `🔒 Mercado negro só pra criminosos com ficha (${MIN_RECORD_TO_ACCESS}+ crimes). Você tem ${p.criminalRecord}.`);
+  const lines = Object.values(BLACK_MARKET).map(i => `${i.emoji} **${i.key}** — ${i.name} · ${formatMoney(i.price)}\n_${i.description}_`);
+  const e = new EmbedBuilder().setTitle("🕶️ Mercado Negro").setColor(0x111111).setDescription(lines.join("\n\n")).setFooter({ text: "Use !mncomprar <chave>" });
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["mncomprar", "mnbuy"], async (msg, args) => {
+  const key = (args[0] ?? "").toLowerCase();
+  const item = BLACK_MARKET[key];
+  if (!item) return reply(msg, "❌ Item não existe. Veja `!mn`.");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (p.criminalRecord < MIN_RECORD_TO_ACCESS) return reply(msg, "🔒 Sem acesso ao mercado negro.");
+  if (p.balance < item.price) return reply(msg, "❌ Sem grana.");
+  await updatePlayer(p.discordId, { balance: p.balance - item.price, karma: p.karma - 5 });
+  // efeitos especiais
+  if (item.key === "rgfalso") {
+    await updatePlayer(p.discordId, { criminalRecord: Math.floor(p.criminalRecord / 2) });
+    return reply(msg, `🪪 RG falso comprado. Ficha reduzida pela metade.`);
+  }
+  if (item.key === "passaporte") {
+    await updatePlayer(p.discordId, { wantedLevel: 0 });
+    return reply(msg, `🛂 Passaporte frio. Nível de procurado zerado.`);
+  }
+  if (item.key === "doping") {
+    await updatePlayer(p.discordId, { energy: 100 });
+    return reply(msg, `💊 Doping! Energia restaurada.`);
+  }
+  if (item.key === "colete") {
+    await updatePlayer(p.discordId, { maxHealth: p.maxHealth + 50 });
+    return reply(msg, `🦺 Colete equipado. +50 vida máxima.`);
+  }
+  if (item.type === "weapon") {
+    await updatePlayer(p.discordId, { weapon: item.key });
+    return reply(msg, `${item.emoji} ${item.name} adquirida no mercado negro.`);
+  }
+  return reply(msg, `✅ ${item.name} comprado.`);
+});
+
+// ============ LOTERIA ============
+reg(["loteria", "lot"], async (msg) => {
+  const draw = await getCurrentDraw();
+  const tickets = await db.query.lotteryTickets.findMany({ where: eq(schema.lotteryTickets.drawId, draw.id) });
+  const mine = tickets.filter(t => t.playerId === msg.author.id);
+  const e = new EmbedBuilder().setTitle(`🎰 Loteria #${draw.drawNumber}`).setColor(0xff00ff).addFields(
+    { name: "💰 Prêmio acumulado", value: formatMoney(draw.totalPot), inline: true },
+    { name: "🎫 Bilhetes vendidos", value: `${tickets.length}`, inline: true },
+    { name: "📅 Sorteio em", value: draw.drawAt.toLocaleString("pt-BR"), inline: false },
+    { name: "🎟️ Seus bilhetes", value: mine.length === 0 ? "Nenhum" : mine.map(t => `#${t.number}`).join(", "), inline: false },
+  ).setFooter({ text: `Use !bilhete <número 1-${NUMBER_RANGE}> · R$ ${TICKET_PRICE}` });
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["bilhete", "comprarbilhete"], async (msg, args) => {
+  const n = intArg(args, 0);
+  if (!n || n < 1 || n > NUMBER_RANGE) return reply(msg, `❌ Uso: \`!bilhete <1-${NUMBER_RANGE}>\``);
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (p.balance < TICKET_PRICE) return reply(msg, `❌ Bilhete custa ${formatMoney(TICKET_PRICE)}.`);
+  await updatePlayer(p.discordId, { balance: p.balance - TICKET_PRICE });
+  const draw = await buyTicket(p.discordId, n);
+  return reply(msg, `🎟️ Bilhete #${n} comprado para o sorteio #${draw.drawNumber}!`);
+});
+
+// ============ EVENTOS ECONÔMICOS ============
+reg(["evento", "economia"], async (msg, args) => {
+  const sub = (args[0] ?? "").toLowerCase();
+  if (sub && msg.member?.permissions.has("Administrator") && sub in EVENT_DEFS) {
+    await startEvent(sub as EventType);
+    const def = EVENT_DEFS[sub as EventType];
+    return reply(msg, `${def.emoji} Evento **${def.name}** iniciado por ${def.durationH}h.`);
+  }
+  const active = await getActiveEvent();
+  if (!active) return reply(msg, "📊 Economia estável. Nenhum evento ativo.");
+  const def = EVENT_DEFS[active.type as EventType];
+  if (!def) return reply(msg, "📊 Evento desconhecido.");
+  const remainingH = Math.max(0, (active.endsAt.getTime() - Date.now()) / (60 * 60 * 1000));
+  return reply(msg, `${def.emoji} **${def.name}** — ${def.desc}\n⏰ Resta ~${remainingH.toFixed(1)}h. Multiplicador: ${def.multiplier}x`);
+});
+
+// Auto-check de falência ao usar saldo
+reg(["checkfalencia"], async (msg) => {
+  const b = await checkBankruptcy(msg.author.id);
+  return reply(msg, b ? "🔴 Você está em falência." : "✅ Situação financeira sob controle.");
+});
+
 // ============ ADMIN ============
 reg(["adm"], async (msg, args) => {
   if (!msg.member?.permissions.has("Administrator")) return reply(msg, "❌ Só admins.");
@@ -1117,7 +1374,17 @@ reg(["ajuda", "help", "comandos"], async (msg) => {
       { name: "📊 Bolsa", value: "`!bolsa` `!bcomprar <SYM> <q>` `!bvender <SYM> <q>` `!carteira`" },
       { name: "🛠️ Admin/Outros", value: "`!adm dar|tirar|reset @user [v]` `!top` `!ajuda`" },
     );
-  return msg.reply({ embeds: [e1, e2] }).catch(() => {});
+  const e3 = new EmbedBuilder().setColor(0x5865f2).setTitle("📖 Comandos — Parte 3").addFields(
+      { name: "📜 Dívidas/Crédito", value: "`!fiado @user <v> [dias]` `!dividas` `!pagar <id>`" },
+      { name: "⚖️ Falência", value: "`!falir` `!status` `!checkfalencia`" },
+      { name: "⭐ Reputação/Karma", value: "`!rep [@user]`" },
+      { name: "🤔 Escolhas Morais", value: "`!moral` (responda 1, 2 ou 3)" },
+      { name: "🧾 Imposto", value: "`!ir` (paga IR semanal) · `!sonegar` (arriscado)" },
+      { name: "🕶️ Mercado Negro", value: "`!mn` `!mncomprar <chave>` (precisa ficha criminal 3+)" },
+      { name: "🎰 Loteria", value: "`!loteria` `!bilhete <1-100>` (sorteio diário automático)" },
+      { name: "📊 Eventos Econômicos", value: "`!evento` (ver atual) · admin: `!evento inflacao|recessao|boom|deflacao`" },
+    );
+  return msg.reply({ embeds: [e1, e2, e3] }).catch(() => {});
 });
 
 // ============ DISPATCHER ============

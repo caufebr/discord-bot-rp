@@ -3,6 +3,9 @@ import { handleMessage } from "./messages.js";
 import { startWorldEngine } from "./systems/worldEvents.js";
 import { startRadio } from "./systems/radio.js";
 import { ensureSeason, startSeasonChecker } from "./systems/seasons.js";
+import { startDebtCron } from "./systems/debts.js";
+import { startLotteryCron } from "./systems/lottery.js";
+import { startEventCron } from "./systems/economicEvents.js";
 import { seedDatabase } from "./systems/seed.js";
 import { clearSlashCommands } from "./deploy-commands.js";
 import { logger } from "../lib/logger.js";
@@ -43,6 +46,12 @@ export async function startBot() {
     logger.info(`📻 Rádio iniciada (canal ${RADIO_CHANNEL_ID}).`);
     startSeasonChecker(client, eventChannelId || RADIO_CHANNEL_ID);
     logger.info("🔄 Verificador de temporadas iniciado.");
+    startDebtCron();
+    logger.info("📜 Cron de dívidas iniciado.");
+    startLotteryCron(client, eventChannelId || RADIO_CHANNEL_ID);
+    logger.info("🎰 Cron de loteria iniciado.");
+    startEventCron(client, eventChannelId || RADIO_CHANNEL_ID);
+    logger.info("📊 Cron de eventos econômicos iniciado.");
   });
 
   client.on("messageCreate", async (msg) => {
