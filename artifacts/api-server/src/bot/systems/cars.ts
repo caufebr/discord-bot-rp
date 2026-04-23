@@ -24,6 +24,20 @@ export const CAR_MODELS: Record<string, CarModel> = {
 export const MAINTENANCE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 export const REPAIR_COST_PER_POINT = 80;
 
+export const CATEGORY_TOP_SPEED: Record<string, number> = {
+  popular: 150,
+  sedan: 200,
+  suv: 190,
+  esportivo: 290,
+  luxo: 340,
+};
+
+export function topSpeedFor(category: string, condition: number): number {
+  const base = CATEGORY_TOP_SPEED[category] ?? 140;
+  const condFactor = Math.max(0.5, condition / 100);
+  return Math.floor(base * condFactor);
+}
+
 export function depreciate(currentValue: number, basePrice: number, condition: number): number {
   const condFactor = Math.max(0.2, condition / 100);
   return Math.floor(basePrice * condFactor * 0.85);

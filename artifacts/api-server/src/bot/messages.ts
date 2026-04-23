@@ -16,6 +16,7 @@ import {
 } from "./systems/player.js";
 import {
   getEconomy,
+  getGovernment,
   logTransaction,
   cooldownLeft,
   formatCooldown,
@@ -25,7 +26,7 @@ import {
   type ProfessionKey,
 } from "./systems/economy.js";
 import { SHOP_ITEMS, CROPS, WEAPONS, BR_STATES, POLITICAL_SIDES, GENDERS, PET_SPECIES } from "./systems/shop.js";
-import { CAR_MODELS, depreciate, repairCost, MAINTENANCE_INTERVAL_MS } from "./systems/cars.js";
+import { CAR_MODELS, depreciate, repairCost, MAINTENANCE_INTERVAL_MS, topSpeedFor, CATEGORY_TOP_SPEED } from "./systems/cars.js";
 import { HOUSE_TYPES, HOUSE_UPGRADES } from "./systems/houses.js";
 import { ANIMAL_SPECIES, HUNGER_DECAY_PER_HOUR } from "./systems/farmAnimals.js";
 import { createDebt, listDebts, payDebt, checkBankruptcy, declareBankruptcy, DEFAULT_INTEREST, DEFAULT_DUE_DAYS } from "./systems/debts.js";
@@ -1343,6 +1344,608 @@ reg(["adm"], async (msg, args) => {
   return reply(msg, "❌ Subcomando inválido.");
 });
 
+// ============ DASHBOARD GLOBAL ============
+function bar(value: number, max: number, size = 10): string {
+  const v = Math.max(0, Math.min(max, value));
+  const filled = Math.round((v / max) * size);
+  return "█".repeat(filled) + "░".repeat(size - filled);
+}
+
+reg(["dash", "dashboard", "painel"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const cars = await db.query.cars.findMany({ where: eq(schema.cars.ownerId, p.discordId) });
+  const house = await db.query.houses.findFirst({ where: eq(schema.houses.ownerId, p.discordId) });
+  const plots = await db.query.plots.findMany({ where: and(eq(schema.plots.ownerId, p.discordId), eq(schema.plots.harvested, false)) });
+  const stocks = await db.query.stockPortfolios.findMany({ where: eq(schema.stockPortfolios.playerId, p.discordId) });
+  const company = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  const debts = await listDebts(p.discordId);
+  const totalDebt = debts.reduce((s, d) => s + d.remainingAmount, 0);
+
+  let stockValue = 0;
+  for (const s of stocks) {
+    const c = await db.query.companies.findFirst({ where: eq(schema.companies.id, s.companyId) });
+    if (c) stockValue += c.sharePrice * s.shares;
+  }
+
+  const e = new EmbedBuilder()
+    .setTitle(`🎛️ Painel — ${p.username}`)
+    .setColor(0x5865f2)
+    .setThumbnail(msg.author.displayAvatarURL())
+    .addFields(
+      { name: "💰 Carteira", value: formatMoney(p.balance), inline: true },
+      { name: "🏦 Banco", value: formatMoney(p.bankBalance), inline: true },
+      { name: "📊 Ações", value: formatMoney(stockValue), inline: true },
+      { name: "❤️ Vida", value: `${bar(p.health, p.maxHealth)} ${p.health}/${p.maxHealth}`, inline: false },
+      { name: "⚡ Energia", value: `${bar(p.energy, 100)} ${p.energy}/100`, inline: false },
+      { name: "🏠 Imóvel", value: house ? `${HOUSE_TYPES[house.type]?.emoji ?? "🏠"} ${HOUSE_TYPES[house.type]?.name ?? house.type}` : "Nenhum", inline: true },
+      { name: "🚗 Garagem", value: `${cars.length} carro(s)`, inline: true },
+      { name: "🌾 Plantações", value: `${plots.length} ativa(s)`, inline: true },
+      { name: "💼 Empresa", value: company ? `${company.name} (Nv ${company.level})` : "Nenhuma", inline: true },
+      { name: "⭐ Reputação", value: `${p.reputation}`, inline: true },
+      { name: "🧘 Karma", value: `${p.karma}`, inline: true },
+      { name: "📜 Dívidas", value: formatMoney(totalDebt), inline: true },
+    )
+    .setFooter({ text: "Use !ajuda para ver todos os comandos" });
+  return reply(msg, { embeds: [e] });
+});
+
+// ============ BOLSA — COTAÇÕES E VALORIZAÇÃO ============
+function pctChange(history: number[], current: number): number {
+  const prev = history.length >= 2 ? history[history.length - 2] : history[0];
+  if (!prev || prev === 0) return 0;
+  return ((current - prev) / prev) * 100;
+}
+
+function trendIcon(p: number): string {
+  if (p > 5) return "🚀";
+  if (p > 0) return "📈";
+  if (p === 0) return "➡️";
+  if (p > -5) return "📉";
+  return "🔻";
+}
+
+reg(["cotacoes", "acoes", "bolsa2", "blista"], async (msg) => {
+  const list = await db.query.companies.findMany({ where: eq(schema.companies.isPublic, true), limit: 25 });
+  if (list.length === 0) return reply(msg, "📊 Nenhuma empresa listada. Empresários podem abrir capital com `!eipo`.");
+  const e = new EmbedBuilder().setTitle("📈 Bolsa de Valores — Cotações").setColor(0x00aa44);
+  const sorted = [...list].sort((a, b) => b.sharePrice - a.sharePrice);
+  for (const c of sorted) {
+    const hist = (c.priceHistory as number[]) ?? [];
+    const variation = pctChange(hist, c.sharePrice);
+    const ico = trendIcon(variation);
+    const sign = variation >= 0 ? "+" : "";
+    e.addFields({
+      name: `${ico} [${c.stockSymbol ?? "?"}] ${c.name}`,
+      value: `💰 ${formatMoney(c.sharePrice)} (${sign}${variation.toFixed(2)}%)\n📦 ${c.availableShares}/${c.totalShares} · 🏭 ${c.sector}`,
+      inline: true,
+    });
+  }
+  e.setFooter({ text: "Use !bcomprar <SYM> <qty> · !bvender <SYM> <qty> · !bdetalhe <SYM>" });
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["bdetalhe", "binfo", "acao"], async (msg, args) => {
+  const sym = args[0]?.toUpperCase();
+  if (!sym) return reply(msg, "❌ Uso: `!bdetalhe <SIMBOLO>`");
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.stockSymbol, sym) });
+  if (!c || !c.isPublic) return reply(msg, "❌ Ação não encontrada na bolsa.");
+  const hist = (c.priceHistory as number[]) ?? [];
+  const variation = pctChange(hist, c.sharePrice);
+  const last5 = hist.slice(-5);
+  const sparkline = last5.length >= 2
+    ? last5.map((p, i) => i === 0 ? "•" : p > last5[i - 1] ? "↗" : p < last5[i - 1] ? "↘" : "→").join(" ")
+    : "Dados insuficientes";
+  const e = new EmbedBuilder()
+    .setTitle(`🏢 ${c.name} [${sym}] ${trendIcon(variation)}`)
+    .setColor(variation >= 0 ? 0x00aa44 : 0xaa2222)
+    .addFields(
+      { name: "💰 Preço", value: formatMoney(c.sharePrice), inline: true },
+      { name: "📊 Variação", value: `${variation >= 0 ? "+" : ""}${variation.toFixed(2)}%`, inline: true },
+      { name: "🏛️ Market Cap", value: formatMoney(c.marketCap), inline: true },
+      { name: "📦 Disponíveis", value: `${c.availableShares}/${c.totalShares}`, inline: true },
+      { name: "⭐ Reputação", value: `${bar(c.reputation, 100)} ${c.reputation}/100`, inline: true },
+      { name: "🏭 Setor", value: c.sector, inline: true },
+      { name: "📉 Histórico", value: sparkline, inline: false },
+    );
+  return reply(msg, { embeds: [e] });
+});
+
+// ============ POLÍTICA — PREFIXO ! ============
+reg(["governo", "gov"], async (msg) => {
+  const gov = await getGovernment();
+  const laws = await db.query.laws.findMany({ where: eq(schema.laws.isActive, true), limit: 10 });
+  const e = new EmbedBuilder().setTitle("🏛️ Governo Atual").setColor(0x003399).addFields(
+    { name: "🇧🇷 Presidente", value: gov.presidentId ? `<@${gov.presidentId}>` : "Vago", inline: true },
+    { name: "🏙️ Prefeito", value: gov.mayorId ? `<@${gov.mayorId}>` : "Vago", inline: true },
+    { name: "💸 Imposto (mult.)", value: `${gov.taxMultiplier}%`, inline: true },
+    { name: "🚔 Salário polícia", value: `${gov.policeSalaryMultiplier}%`, inline: true },
+    { name: "🦹 Crime (mult.)", value: `${gov.crimeMultiplier}%`, inline: true },
+    { name: "📜 Leis ativas", value: laws.length > 0 ? laws.map(l => `• **${l.name}** — ${l.description}`).join("\n").slice(0, 1000) : "Nenhuma", inline: false },
+  );
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["eleicao", "iniciareleicao"], async (msg, args) => {
+  if (!msg.member?.permissions.has("Administrator")) return reply(msg, "❌ Apenas admins iniciam eleições.");
+  const cargo = (args[0] ?? "").toLowerCase();
+  if (!["presidente", "prefeito"].includes(cargo)) return reply(msg, "❌ Uso: `!eleicao <presidente|prefeito>`");
+  const existing = await db.query.elections.findFirst({ where: eq(schema.elections.isActive, true) });
+  if (existing) return reply(msg, "❌ Já existe uma eleição em andamento. Use `!apurar` quando terminar.");
+  const endTime = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  await db.insert(schema.elections).values({
+    position: cargo, candidates: [], votes: {},
+    isActive: true, startTime: new Date(), endTime,
+  });
+  return reply(msg, `🗳️ Eleição para **${cargo}** aberta! Termina <t:${Math.floor(endTime.getTime() / 1000)}:R>.\n• \`!candidatar\` para entrar.\n• \`!votar @user\` para votar.\n• \`!apurar\` quando terminar.`);
+});
+
+reg(["candidatar", "candidato"], async (msg) => {
+  const election = await db.query.elections.findFirst({ where: eq(schema.elections.isActive, true) });
+  if (!election) return reply(msg, "❌ Sem eleição ativa.");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (p.balance < 2000) return reply(msg, "❌ Custa R$ 2.000 para registrar candidatura.");
+  const candidates = (election.candidates as string[]) ?? [];
+  if (candidates.includes(p.discordId)) return reply(msg, "❌ Você já é candidato.");
+  candidates.push(p.discordId);
+  await removeMoney(p.discordId, 2000);
+  await db.update(schema.elections).set({ candidates }).where(eq(schema.elections.id, election.id));
+  return reply(msg, `🗳️ ${msg.author.username} se candidatou para **${election.position}**! Boa sorte 🎉`);
+});
+
+reg(["votar"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  if (!tid) return reply(msg, "❌ Uso: `!votar @candidato`");
+  const election = await db.query.elections.findFirst({ where: eq(schema.elections.isActive, true) });
+  if (!election) return reply(msg, "❌ Sem eleição ativa.");
+  const candidates = (election.candidates as string[]) ?? [];
+  if (!candidates.includes(tid)) return reply(msg, "❌ Esse jogador não é candidato.");
+  const votes = { ...((election.votes as Record<string, string>) ?? {}) };
+  if (votes[msg.author.id]) return reply(msg, "❌ Você já votou.");
+  votes[msg.author.id] = tid;
+  await db.update(schema.elections).set({ votes }).where(eq(schema.elections.id, election.id));
+  return reply(msg, `✅ Voto registrado em <@${tid}>!`);
+});
+
+reg(["apurar", "encerrar_eleicao"], async (msg) => {
+  const election = await db.query.elections.findFirst({ where: eq(schema.elections.isActive, true) });
+  if (!election) return reply(msg, "❌ Sem eleição ativa.");
+  const isAdmin = msg.member?.permissions.has("Administrator") ?? false;
+  const ended = election.endTime && new Date() >= election.endTime;
+  if (!ended && !isAdmin) return reply(msg, `⏳ Eleição ainda em andamento. Termina <t:${Math.floor((election.endTime?.getTime() ?? 0) / 1000)}:R>.`);
+
+  const votes = (election.votes as Record<string, string>) ?? {};
+  const tally: Record<string, number> = {};
+  for (const v of Object.values(votes)) tally[v] = (tally[v] ?? 0) + 1;
+  const sorted = Object.entries(tally).sort((a, b) => b[1] - a[1]);
+  if (sorted.length === 0) {
+    await db.update(schema.elections).set({ isActive: false }).where(eq(schema.elections.id, election.id));
+    return reply(msg, "🗳️ Eleição encerrada sem votos.");
+  }
+  const [winnerId, winnerVotes] = sorted[0];
+  await db.update(schema.elections).set({ isActive: false, winnerId }).where(eq(schema.elections.id, election.id));
+  const govUpdate: any = election.position === "presidente" ? { presidentId: winnerId } : { mayorId: winnerId };
+  await db.update(schema.government).set({ ...govUpdate, updatedAt: new Date() }).where(eq(schema.government.id, 1));
+
+  const tallyText = sorted.slice(0, 5).map(([id, n], i) => `${i + 1}. <@${id}> — ${n} voto(s)`).join("\n");
+  const e = new EmbedBuilder().setTitle(`🏆 Apuração — ${election.position}`).setColor(0xffcc00).setDescription(`Vencedor: <@${winnerId}> (${winnerVotes} votos)\n\n${tallyText}`);
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["proporlei", "lei"], async (msg, args) => {
+  const efeito = (args[0] ?? "").toLowerCase();
+  const nome = args.slice(1).join(" ");
+  const EFEITOS: Record<string, string> = {
+    tax_up: "Aumentar imposto +10%",
+    tax_down: "Reduzir imposto -10%",
+    police_up: "Aumentar segurança +20%",
+    crime_easy: "Tolerar crime menor (-20%)",
+    police_pay_up: "Aumentar salário policial +20%",
+    police_pay_down: "Reduzir salário policial -20%",
+  };
+  if (!efeito || !nome || !(efeito in EFEITOS)) {
+    return reply(msg, `❌ Uso: \`!proporlei <efeito> <nome da lei>\`\nEfeitos: ${Object.entries(EFEITOS).map(([k, v]) => `\`${k}\` (${v})`).join(", ")}`);
+  }
+  const gov = await getGovernment();
+  if (gov.presidentId !== msg.author.id && gov.mayorId !== msg.author.id) {
+    return reply(msg, "❌ Só presidente ou prefeito pode propor leis.");
+  }
+  await db.insert(schema.laws).values({ name: nome, description: EFEITOS[efeito], effect: efeito, proposedBy: msg.author.id, approvedAt: new Date() });
+  const updates: any = { updatedAt: new Date() };
+  if (efeito === "tax_up") updates.taxMultiplier = Math.min(200, gov.taxMultiplier + 10);
+  if (efeito === "tax_down") updates.taxMultiplier = Math.max(0, gov.taxMultiplier - 10);
+  if (efeito === "police_up") updates.crimeMultiplier = Math.min(200, gov.crimeMultiplier + 20);
+  if (efeito === "crime_easy") updates.crimeMultiplier = Math.max(0, gov.crimeMultiplier - 20);
+  if (efeito === "police_pay_up") updates.policeSalaryMultiplier = Math.min(200, gov.policeSalaryMultiplier + 20);
+  if (efeito === "police_pay_down") updates.policeSalaryMultiplier = Math.max(0, gov.policeSalaryMultiplier - 20);
+  await db.update(schema.government).set(updates).where(eq(schema.government.id, 1));
+  return reply(msg, `📜 Lei **"${nome}"** sancionada!\nEfeito: ${EFEITOS[efeito]}`);
+});
+
+reg(["leis"], async (msg) => {
+  const laws = await db.query.laws.findMany({ where: eq(schema.laws.isActive, true), limit: 20 });
+  if (laws.length === 0) return reply(msg, "📜 Nenhuma lei ativa.");
+  return reply(msg, "📜 **Leis em vigor:**\n" + laws.map(l => `• **${l.name}** — ${l.description} _(por <@${l.proposedBy}>)_`).join("\n"));
+});
+
+// ============ RACHA DE CARROS ============
+const activeRaces = new Map<string, { challenger: string; bet: number; expires: number }>();
+
+reg(["racha"], async (msg, args) => {
+  const bet = intArg(args, 0);
+  const tid = getMentionId(msg, args, 1) ?? (msg.mentions.users.first()?.id ?? null);
+  if (!bet || !tid || tid === msg.author.id) {
+    return reply(msg, "❌ Uso: `!racha <valor> @user` — desafia alguém para uma corrida apostando dinheiro.");
+  }
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const t = await getPlayer(tid);
+  if (!t) return reply(msg, "❌ O alvo precisa ter ficha (use o bot uma vez).");
+  if (p.balance < bet || t.balance < bet) return reply(msg, `❌ Os dois precisam ter pelo menos ${formatMoney(bet)} em mãos.`);
+
+  const myCars = await db.query.cars.findMany({ where: eq(schema.cars.ownerId, p.discordId) });
+  const tgCars = await db.query.cars.findMany({ where: eq(schema.cars.ownerId, tid) });
+  if (myCars.length === 0) return reply(msg, "❌ Você precisa de pelo menos um carro. Veja `!autos`.");
+  if (tgCars.length === 0) return reply(msg, "❌ O desafiado não tem carro.");
+
+  const pickFastest = (cars: typeof myCars) => {
+    let best = cars[0];
+    let bestSpeed = topSpeedFor(best.category, best.condition);
+    for (const c of cars) {
+      const sp = topSpeedFor(c.category, c.condition);
+      if (sp > bestSpeed) { best = c; bestSpeed = sp; }
+    }
+    return { car: best, speed: bestSpeed };
+  };
+
+  const a = pickFastest(myCars);
+  const b = pickFastest(tgCars);
+
+  // Confirm phase
+  const key = `${tid}:${msg.author.id}`;
+  activeRaces.set(key, { challenger: msg.author.id, bet, expires: Date.now() + 60000 });
+
+  const e = new EmbedBuilder().setTitle("🏁 Desafio de Racha!").setColor(0xff6600).setDescription(
+    `<@${msg.author.id}> desafiou <@${tid}> para um racha apostando **${formatMoney(bet)}** cada um.\n\n` +
+    `🚗 ${a.car.model} — vel. máx ${a.speed} km/h (estado ${a.car.condition}%)\n` +
+    `🚗 ${b.car.model} — vel. máx ${b.speed} km/h (estado ${b.car.condition}%)\n\n` +
+    `<@${tid}>, responda com \`!aceitarracha\` em até 60s ou \`!recusarracha\`.`,
+  );
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["aceitarracha"], async (msg) => {
+  // find any active race targeting this user
+  let entry: { key: string; challenger: string; bet: number } | null = null;
+  for (const [key, r] of activeRaces.entries()) {
+    if (key.startsWith(`${msg.author.id}:`) && r.expires > Date.now()) {
+      entry = { key, challenger: r.challenger, bet: r.bet };
+      break;
+    }
+  }
+  if (!entry) return reply(msg, "❌ Sem desafios pendentes.");
+  activeRaces.delete(entry.key);
+
+  const challenger = await getPlayer(entry.challenger);
+  const me = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (!challenger) return reply(msg, "❌ Desafiante sumiu.");
+  if (challenger.balance < entry.bet || me.balance < entry.bet) return reply(msg, "❌ Um dos dois ficou sem grana suficiente.");
+
+  const aCars = await db.query.cars.findMany({ where: eq(schema.cars.ownerId, challenger.discordId) });
+  const bCars = await db.query.cars.findMany({ where: eq(schema.cars.ownerId, me.discordId) });
+  if (aCars.length === 0 || bCars.length === 0) return reply(msg, "❌ Algum dos dois ficou sem carro.");
+
+  const pickFastest = (cars: typeof aCars) => {
+    let best = cars[0];
+    let bestSpeed = topSpeedFor(best.category, best.condition);
+    for (const c of cars) {
+      const sp = topSpeedFor(c.category, c.condition);
+      if (sp > bestSpeed) { best = c; bestSpeed = sp; }
+    }
+    return { car: best, speed: bestSpeed };
+  };
+
+  const a = pickFastest(aCars);
+  const b = pickFastest(bCars);
+
+  // Race simulation: each "tick" each car advances by speed * (0.7 + random*0.6); first to 1500 wins
+  const TARGET = 1500;
+  let posA = 0, posB = 0;
+  const ticks: string[] = [];
+  for (let i = 0; i < 30; i++) {
+    posA += a.speed * (0.7 + Math.random() * 0.6) * 0.05;
+    posB += b.speed * (0.7 + Math.random() * 0.6) * 0.05;
+    if (posA >= TARGET || posB >= TARGET) break;
+  }
+  const winnerIsA = posA >= posB;
+  const winnerId = winnerIsA ? challenger.discordId : me.discordId;
+  const loserId = winnerIsA ? me.discordId : challenger.discordId;
+
+  await removeMoney(loserId, entry.bet);
+  await addMoney(winnerId, entry.bet);
+  await logTransaction(loserId, winnerId, entry.bet, "race", "Aposta de racha");
+
+  // Slight wear & tear on both cars
+  await db.update(schema.cars).set({ condition: Math.max(10, a.car.condition - 5) }).where(eq(schema.cars.id, a.car.id));
+  await db.update(schema.cars).set({ condition: Math.max(10, b.car.condition - 5) }).where(eq(schema.cars.id, b.car.id));
+
+  const e = new EmbedBuilder().setTitle("🏁 Resultado do Racha").setColor(0xff6600).setDescription(
+    `🚗 ${a.car.model}: ${bar(Math.min(TARGET, posA), TARGET, 12)}\n` +
+    `🚗 ${b.car.model}: ${bar(Math.min(TARGET, posB), TARGET, 12)}\n\n` +
+    `🏆 Vencedor: <@${winnerId}> +${formatMoney(entry.bet)}\n💸 Perdedor: <@${loserId}> -${formatMoney(entry.bet)}\n\n_Carros sofreram desgaste de 5% — usem \`!consertar\`._`,
+  );
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["recusarracha"], async (msg) => {
+  for (const [key] of activeRaces.entries()) {
+    if (key.startsWith(`${msg.author.id}:`)) { activeRaces.delete(key); return reply(msg, "🚫 Desafio recusado."); }
+  }
+  return reply(msg, "❌ Sem desafios pendentes.");
+});
+
+// ============ EMPRESA — PREFIXO ! (apenas empresários certificados) ============
+const COMPANY_CREATE_COST = 20000;
+const IPO_COST = 50000;
+const ADVERTISE_COST = 2000;
+const EMPLOYEE_SALARY = 1500;
+const EMPRESA_SETORES = ["Tecnologia", "Saúde", "Alimentação", "Transporte", "Segurança", "Entretenimento", "Construção", "Finanças"];
+
+function isEmpresario(p: any): boolean {
+  return p.profession === "empresario" && p.isCertified === true;
+}
+
+reg(["empresa", "minhaempresa"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) {
+    if (!isEmpresario(p)) return reply(msg, "❌ Apenas formados em **Empresário** podem ter empresa. Use `!curso empresario` e `!treinar`.");
+    return reply(msg, `🏢 Você ainda não tem empresa. Use \`!ecriar <nome> <setor> <descrição>\`.\nSetores: ${EMPRESA_SETORES.join(", ")}\nCusto: ${formatMoney(COMPANY_CREATE_COST)}`);
+  }
+  const employees = (c.employees as string[]) ?? [];
+  const lucro = c.revenue - c.expenses;
+  const lucroIco = lucro >= 0 ? "📈" : "📉";
+  const e = new EmbedBuilder().setTitle(`🏢 ${c.name}`).setColor(0x003388).addFields(
+    { name: "🏭 Setor", value: c.sector, inline: true },
+    { name: "📊 Nível", value: `${c.level}/10`, inline: true },
+    { name: "⭐ Reputação", value: `${bar(c.reputation, 100)} ${c.reputation}`, inline: false },
+    { name: "💰 Receita", value: formatMoney(c.revenue), inline: true },
+    { name: "💸 Despesas", value: formatMoney(c.expenses), inline: true },
+    { name: `${lucroIco} Lucro`, value: formatMoney(lucro), inline: true },
+    { name: "👥 Funcionários", value: `${employees.length}/${c.level * 3}`, inline: true },
+    { name: "📈 Bolsa", value: c.isPublic ? `[${c.stockSymbol}] ${formatMoney(c.sharePrice)}` : "Não (use `!eipo`)", inline: true },
+    { name: "📝 Descrição", value: c.description ?? "—", inline: false },
+  );
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["ecriar"], async (msg, args) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (!isEmpresario(p)) return reply(msg, "❌ Apenas formados em **Empresário** certificados podem criar empresa. Use `!curso empresario` e `!treinar`.");
+  const nome = args[0];
+  const setor = args[1];
+  const descricao = args.slice(2).join(" ") || "Sem descrição";
+  if (!nome || !setor) return reply(msg, `❌ Uso: \`!ecriar "<nome>" <setor> <descrição>\`\nSetores: ${EMPRESA_SETORES.join(", ")}`);
+  if (!EMPRESA_SETORES.includes(setor)) return reply(msg, `❌ Setor inválido. Opções: ${EMPRESA_SETORES.join(", ")}`);
+  const owned = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (owned) return reply(msg, "❌ Você já tem uma empresa.");
+  const exists = await db.query.companies.findFirst({ where: eq(schema.companies.name, nome) });
+  if (exists) return reply(msg, "❌ Esse nome já existe.");
+  if (p.balance < COMPANY_CREATE_COST) return reply(msg, `❌ Custa ${formatMoney(COMPANY_CREATE_COST)}.`);
+  await removeMoney(p.discordId, COMPANY_CREATE_COST);
+  const id = `co_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+  await db.insert(schema.companies).values({
+    id, name: nome, ownerId: p.discordId, sector: setor, description: descricao,
+    employees: [], revenue: 0, expenses: COMPANY_CREATE_COST, totalShares: 1000, availableShares: 1000,
+    sharePrice: 100, marketCap: 100000, isPublic: false, level: 1, reputation: 50, priceHistory: [],
+  });
+  return reply(msg, `🏢 Empresa **${nome}** criada no setor **${setor}**!\nPróximos: \`!econtratar @user\` · \`!eanunciar\` · \`!eexpandir\` · \`!eipo\` (a partir do nv 3)`);
+});
+
+reg(["econtratar", "contratar"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  if (!tid) return reply(msg, "❌ Uso: `!econtratar @user`");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Você não tem empresa.");
+  const t = await getPlayer(tid);
+  if (!t) return reply(msg, "❌ Alvo precisa ter ficha.");
+  const employees = (c.employees as string[]) ?? [];
+  if (employees.includes(tid)) return reply(msg, "❌ Já é funcionário.");
+  const max = c.level * 3;
+  if (employees.length >= max) return reply(msg, `❌ Capacidade ${max} no nv ${c.level}. Faça \`!eexpandir\`.`);
+  employees.push(tid);
+  await db.update(schema.companies).set({ employees }).where(eq(schema.companies.id, c.id));
+  return reply(msg, `✅ <@${tid}> contratado na **${c.name}**! Salário ${formatMoney(EMPLOYEE_SALARY)}/dia (use \`!epagar\`).`);
+});
+
+reg(["edemitir", "demitir"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  if (!tid) return reply(msg, "❌ Uso: `!edemitir @user`");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Você não tem empresa.");
+  const employees = ((c.employees as string[]) ?? []).filter(e => e !== tid);
+  await db.update(schema.companies).set({ employees }).where(eq(schema.companies.id, c.id));
+  return reply(msg, `👋 <@${tid}> foi demitido da **${c.name}**.`);
+});
+
+reg(["epagar", "folha"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Você não tem empresa.");
+  const employees = (c.employees as string[]) ?? [];
+  if (employees.length === 0) return reply(msg, "❌ Sem funcionários.");
+  if (c.lastPayroll && Date.now() - c.lastPayroll.getTime() < 24 * 60 * 60 * 1000) {
+    return reply(msg, `⏳ Folha já paga hoje. Próxima em ${formatCooldown(24 * 60 * 60 * 1000 - (Date.now() - c.lastPayroll.getTime()))}.`);
+  }
+  const total = employees.length * EMPLOYEE_SALARY;
+  if (p.balance < total) return reply(msg, `❌ Folha de ${formatMoney(total)}, você tem ${formatMoney(p.balance)}.`);
+  await removeMoney(p.discordId, total);
+  for (const id of employees) {
+    const emp = await getPlayer(id);
+    if (emp) await updatePlayer(id, { balance: emp.balance + EMPLOYEE_SALARY });
+  }
+  // Receita simulada baseada em reputação e funcionários
+  const earned = Math.floor(employees.length * (300 + c.reputation * 8) * (0.8 + Math.random() * 0.4));
+  await db.update(schema.companies).set({
+    expenses: c.expenses + total,
+    revenue: c.revenue + earned,
+    lastPayroll: new Date(),
+  }).where(eq(schema.companies.id, c.id));
+  return reply(msg, `💼 Folha paga: ${employees.length}× ${formatMoney(EMPLOYEE_SALARY)} = ${formatMoney(total)}\n📊 Receita do dia: +${formatMoney(earned)}`);
+});
+
+reg(["eanunciar", "anunciar"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Sem empresa.");
+  if (p.balance < ADVERTISE_COST) return reply(msg, `❌ Custa ${formatMoney(ADVERTISE_COST)}.`);
+  await removeMoney(p.discordId, ADVERTISE_COST);
+  const gain = Math.floor(Math.random() * 10 + 5);
+  const newRep = Math.min(100, c.reputation + gain);
+  await db.update(schema.companies).set({ reputation: newRep, expenses: c.expenses + ADVERTISE_COST }).where(eq(schema.companies.id, c.id));
+  return reply(msg, `📣 Anúncio veiculado! Reputação ${c.reputation} → ${newRep} (+${gain})`);
+});
+
+reg(["eexpandir", "expandir", "eupgrade"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Sem empresa.");
+  if (c.level >= 10) return reply(msg, "✅ Empresa já está no nível máximo.");
+  const cost = c.level * 15000;
+  if (p.balance < cost) return reply(msg, `❌ Expandir para nv ${c.level + 1} custa ${formatMoney(cost)}.`);
+  await removeMoney(p.discordId, cost);
+  const newLevel = c.level + 1;
+  await db.update(schema.companies).set({
+    level: newLevel,
+    reputation: Math.min(100, c.reputation + 5),
+    expenses: c.expenses + cost,
+  }).where(eq(schema.companies.id, c.id));
+  return reply(msg, `🏗️ **${c.name}** expandiu para nv ${newLevel}! Capacidade: ${newLevel * 3} funcionários.${newLevel === 3 ? "\n🎉 Desbloqueou IPO! Use `!eipo`." : ""}`);
+});
+
+reg(["eipo"], async (msg, args) => {
+  const sym = args[0]?.toUpperCase();
+  const preco = intArg(args, 1);
+  if (!sym || !preco || sym.length < 3 || sym.length > 5) return reply(msg, "❌ Uso: `!eipo <SIMBOLO 3-5 letras> <preço inicial>`");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Sem empresa.");
+  if (c.isPublic) return reply(msg, "❌ Empresa já está na bolsa.");
+  if (c.level < 3) return reply(msg, `❌ Empresa precisa ser nível 3+ (atual ${c.level}). Use \`!eexpandir\`.`);
+  if (p.balance < IPO_COST) return reply(msg, `❌ IPO custa ${formatMoney(IPO_COST)}.`);
+  const dup = await db.query.companies.findFirst({ where: eq(schema.companies.stockSymbol, sym) });
+  if (dup) return reply(msg, "❌ Símbolo em uso.");
+  await removeMoney(p.discordId, IPO_COST);
+  await db.update(schema.companies).set({
+    isPublic: true, stockSymbol: sym, sharePrice: preco, marketCap: preco * 1000,
+    availableShares: 800, priceHistory: [preco], expenses: c.expenses + IPO_COST,
+  }).where(eq(schema.companies.id, c.id));
+  return reply(msg, `🚀 **${c.name}** [${sym}] entrou na bolsa! Preço inicial ${formatMoney(preco)}/ação · 800 ações disponíveis.\nVeja: \`!bdetalhe ${sym}\``);
+});
+
+reg(["esimular", "simular"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Sem empresa.");
+  if (!c.isPublic) return reply(msg, "❌ Empresa não está na bolsa. Use `!eipo`.");
+  // Simulate one tick using employees count, reputation and randomness
+  const employees = (c.employees as string[]) ?? [];
+  const performance = (employees.length * 0.5 + c.reputation / 50 + (Math.random() - 0.5) * 2);
+  const delta = Math.max(-0.15, Math.min(0.15, performance / 25));
+  const newPrice = Math.max(1, Math.floor(c.sharePrice * (1 + delta)));
+  const hist = [...((c.priceHistory as number[]) ?? []), newPrice].slice(-30);
+  await db.update(schema.companies).set({ sharePrice: newPrice, marketCap: newPrice * c.totalShares, priceHistory: hist }).where(eq(schema.companies.id, c.id));
+
+  // Companions (employees) holdings simulation: list current shareholders
+  const holders = await db.query.stockPortfolios.findMany({ where: eq(schema.stockPortfolios.companyId, c.id) });
+  const lines = holders.slice(0, 8).map(h => `• <@${h.playerId}> — ${h.shares} ações · ${formatMoney(h.shares * newPrice)}`).join("\n") || "Nenhum acionista além do dono.";
+
+  const variation = ((newPrice - c.sharePrice) / c.sharePrice) * 100;
+  const e = new EmbedBuilder()
+    .setTitle(`📊 Simulação — ${c.name} [${c.stockSymbol}]`)
+    .setColor(variation >= 0 ? 0x00aa44 : 0xaa2222)
+    .addFields(
+      { name: "💰 Preço", value: `${formatMoney(c.sharePrice)} → ${formatMoney(newPrice)} (${variation >= 0 ? "+" : ""}${variation.toFixed(2)}%)`, inline: false },
+      { name: "👥 Funcionários", value: `${employees.length}`, inline: true },
+      { name: "⭐ Reputação", value: `${c.reputation}`, inline: true },
+      { name: "📈 Acionistas", value: lines, inline: false },
+    );
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["elista", "empresas"], async (msg) => {
+  const all = await db.query.companies.findMany({ limit: 20 });
+  if (all.length === 0) return reply(msg, "🏢 Nenhuma empresa criada.");
+  const e = new EmbedBuilder().setTitle("🏢 Empresas").setColor(0x004488);
+  for (const c of all) {
+    const emp = ((c.employees as string[]) ?? []).length;
+    e.addFields({
+      name: `${c.name} (Nv ${c.level})`,
+      value: `🏭 ${c.sector} · 👥 ${emp} · ⭐ ${c.reputation}${c.isPublic ? ` · 📈 [${c.stockSymbol}] ${formatMoney(c.sharePrice)}` : ""}\nDono: <@${c.ownerId}>`,
+      inline: false,
+    });
+  }
+  return reply(msg, { embeds: [e] });
+});
+
+// ============ LAVAGEM DE DINHEIRO (empresa + crime) ============
+reg(["lavar", "lavagem"], async (msg, args) => {
+  const v = intArg(args, 0);
+  if (!v) return reply(msg, "❌ Uso: `!lavar <valor sujo>` — empresários lavam dinheiro pela empresa.");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
+  if (!c) return reply(msg, "❌ Precisa ter empresa para lavar.");
+  if (p.criminalRecord < 1) return reply(msg, "❌ Lavagem é coisa de criminoso. Sua ficha está limpa demais.");
+  if (p.balance < v) return reply(msg, "❌ Sem dinheiro pra lavar.");
+  await removeMoney(p.discordId, v);
+  // 25% de risco de fiscalização: perde tudo + ficha
+  if (Math.random() < 0.25) {
+    await updatePlayer(p.discordId, { criminalRecord: p.criminalRecord + 2, wantedLevel: p.wantedLevel + 1, karma: p.karma - 10, reputation: p.reputation - 30 });
+    return reply(msg, `🚨 **RECEITA FEDERAL!** A operação foi descoberta. Você perdeu ${formatMoney(v)}, ficha +2 e procurado +1.`);
+  }
+  // Sucesso: 80% volta como receita "limpa" da empresa
+  const limpo = Math.floor(v * 0.8);
+  await addMoney(p.discordId, limpo);
+  await db.update(schema.companies).set({ revenue: c.revenue + limpo }).where(eq(schema.companies.id, c.id));
+  await logTransaction(p.discordId, p.discordId, limpo, "laundry", `Lavagem via ${c.name}`);
+  return reply(msg, `🧼 Lavagem bem sucedida via **${c.name}**! Recebeu ${formatMoney(limpo)} (80%) limpo.\n_Karma -5 · Ficha intocada._`);
+});
+
+// ============ ANIMAÇÃO DE PLANTAR (visual extra) ============
+reg(["plantaranim"], async (msg, args) => {
+  const seed = args[0]?.toLowerCase();
+  if (!seed) return reply(msg, "❌ Uso: `!plantaranim <semente>` (mesmo que !plantar mas com animação).");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const inv = { ...(p.inventory ?? {}) };
+  if (!inv[seed] || inv[seed]! <= 0) return reply(msg, "❌ Você não tem essa semente.");
+  const item = (SHOP_ITEMS as any)[seed];
+  if (!item || item.type !== "seed") return reply(msg, "❌ Item não é semente.");
+  const crop = CROPS[item.cropKey!]!;
+  let minutes = crop.growMinutes;
+  if (inv["fertilizante"] && inv["fertilizante"]! > 0) {
+    minutes = Math.floor(minutes * 0.6);
+    inv["fertilizante"]! -= 1;
+  }
+  inv[seed]! -= 1;
+  const ready = new Date(Date.now() + minutes * 60 * 1000);
+  await db.insert(schema.plots).values({ ownerId: p.discordId, crop: item.cropKey!, readyAt: ready });
+  await updatePlayer(p.discordId, { inventory: inv });
+
+  const sent = await msg.reply(`🌍 Preparando o solo...`).catch(() => null);
+  if (!sent) return;
+  const frames = [
+    `🪨 Removendo pedras... \`${bar(1, 5)}\``,
+    `🚜 Arando o terreno... \`${bar(2, 5)}\``,
+    `💧 Regando... \`${bar(3, 5)}\``,
+    `🌱 Plantando ${crop.emoji} ${crop.name}... \`${bar(4, 5)}\``,
+    `✅ Pronto! ${crop.emoji} **${crop.name}** plantado! Estará pronto em ${minutes} min.`,
+  ];
+  for (const f of frames) {
+    await new Promise(r => setTimeout(r, 700));
+    await sent.edit(f).catch(() => {});
+  }
+});
+
 // ============ TOP / HELP ============
 reg(["top", "ranking"], async (msg) => {
   const top = await db.query.players.findMany({ orderBy: [desc(schema.players.balance)], limit: 10 });
@@ -1384,7 +1987,16 @@ reg(["ajuda", "help", "comandos"], async (msg) => {
       { name: "🎰 Loteria", value: "`!loteria` `!bilhete <1-100>` (sorteio diário automático)" },
       { name: "📊 Eventos Econômicos", value: "`!evento` (ver atual) · admin: `!evento inflacao|recessao|boom|deflacao`" },
     );
-  return msg.reply({ embeds: [e1, e2, e3] }).catch(() => {});
+  const e4 = new EmbedBuilder().setColor(0xff6600).setTitle("📖 Comandos — Novos Sistemas").addFields(
+      { name: "🎛️ Painel Geral", value: "`!dash` (visão completa do seu jogador)" },
+      { name: "📈 Bolsa Detalhada", value: "`!cotacoes` (lista com variação %) · `!bdetalhe <SYM>` (detalhes)" },
+      { name: "🏛️ Política", value: "`!governo` `!leis` · admin: `!eleicao <presidente|prefeito>` · `!candidatar` `!votar @user` `!apurar` · `!proporlei <efeito> <nome>`" },
+      { name: "🏁 Racha de Carros", value: "`!racha <valor> @user` → `!aceitarracha` ou `!recusarracha`" },
+      { name: "💼 Empresa (só Empresário formado)", value: "`!empresa` `!ecriar \"<nome>\" <setor> <desc>` `!econtratar @user` `!edemitir @user` `!epagar` `!eanunciar` `!eexpandir` `!eipo <SYM> <preço>` `!esimular` `!elista`" },
+      { name: "🧼 Lavagem (crime+empresa)", value: "`!lavar <valor>` (precisa empresa + ficha criminal)" },
+      { name: "🌱 Plantio Animado", value: "`!plantaranim <semente>` (com animação visual)" },
+    );
+  return msg.reply({ embeds: [e1, e2, e3, e4] }).catch(() => {});
 });
 
 // ============ DISPATCHER ============
