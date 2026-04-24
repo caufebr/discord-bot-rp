@@ -972,12 +972,18 @@ reg(["ginfo"], async (msg) => {
   if (!p.gangId) return reply(msg, "❌ Sem gangue.");
   const g = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, p.gangId) });
   if (!g) return reply(msg, "❌ Gangue não encontrada.");
+  let warStatus = "🕊️ Não";
+  if (g.isAtWar && g.warTarget) {
+    const inimigo = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, g.warTarget) });
+    const dur = g.warStarted ? Math.floor((Date.now() - g.warStarted.getTime()) / (60 * 60 * 1000)) : 0;
+    warStatus = inimigo ? `⚔️ contra **${inimigo.name}** [${inimigo.tag}] · ${dur}h` : "⚔️ (inimigo não encontrado)";
+  }
   const e = new EmbedBuilder().setTitle(`🏴 ${g.name} [${g.tag}]`).setColor(0x222222).addFields(
     { name: "Líder", value: `<@${g.leaderId}>`, inline: true },
     { name: "Membros", value: `${g.memberCount}`, inline: true },
-    { name: "Banco", value: formatMoney(g.bankBalance), inline: true },
+    { name: "Caixa", value: formatMoney(g.bankBalance), inline: true },
     { name: "Reputação", value: `${g.reputation}`, inline: true },
-    { name: "Em guerra", value: g.isAtWar ? "Sim" : "Não", inline: true },
+    { name: "Em guerra", value: warStatus, inline: false },
   );
   return reply(msg, { embeds: [e] });
 });
@@ -1042,6 +1048,95 @@ reg(["gpagar", "gpag"], async (msg, args) => {
   await addMoney(t.discordId, v);
   await logTransaction(g.id, t.discordId, v, "gang_pay", `Pagamento da gangue ${g.name}`);
   return reply(msg, `💸 Líder pagou ${formatMoney(v)} para <@${t.discordId}>. Caixa restante: ${formatMoney(g.bankBalance - v)}.`);
+});
+
+// ===== GUERRA DE FACÇÕES =====
+
+const GANG_WAR_DECLARE_COST = 10000;
+const GANG_WAR_PEACE_COST = 5000;
+
+reg(["gguerra", "declararguerra"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  const tagArg = (args[0] ?? "").replace(/^\[|\]$/g, "");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (!p.gangId || p.gangRank !== "lider") return reply(msg, "❌ Só o líder declara guerra.");
+  const meu = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, p.gangId) });
+  if (!meu) return reply(msg, "❌ Gangue não encontrada.");
+  if (meu.isAtWar) return reply(msg, `⚔️ Sua gangue já está em guerra. Encerre com \`!gpaz\` antes de abrir outra frente.`);
+
+  let alvo: typeof meu | undefined;
+  if (tid) {
+    const t = await getPlayer(tid);
+    if (!t || !t.gangId) return reply(msg, "❌ Esse usuário não pertence a nenhuma gangue.");
+    alvo = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, t.gangId) });
+  } else if (tagArg && !/^\d+$/.test(tagArg)) {
+    alvo = await db.query.gangs.findFirst({ where: sql`lower(${schema.gangs.tag}) = lower(${tagArg})` });
+  }
+  if (!alvo) return reply(msg, "❌ Uso: `!gguerra <tag-da-gangue>` ou `!gguerra @membro-inimigo`");
+  if (alvo.id === meu.id) return reply(msg, "❌ Não dá pra declarar guerra à própria facção.");
+  if (alvo.isAtWar) return reply(msg, `⚔️ **${alvo.name}** já está envolvida em outra guerra.`);
+  if (meu.bankBalance < GANG_WAR_DECLARE_COST) return reply(msg, `❌ Declarar guerra custa ${formatMoney(GANG_WAR_DECLARE_COST)} do caixa da gangue (você tem ${formatMoney(meu.bankBalance)}).`);
+
+  const now = new Date();
+  await db.update(schema.gangs).set({
+    bankBalance: meu.bankBalance - GANG_WAR_DECLARE_COST,
+    isAtWar: true, warTarget: alvo.id, warStarted: now,
+  }).where(eq(schema.gangs.id, meu.id));
+  await db.update(schema.gangs).set({
+    isAtWar: true, warTarget: meu.id, warStarted: now,
+  }).where(eq(schema.gangs.id, alvo.id));
+  await logTransaction(meu.id, "VOID", GANG_WAR_DECLARE_COST, "war_declare", `Guerra contra ${alvo.name}`);
+
+  const e = new EmbedBuilder().setTitle("⚔️ GUERRA DECLARADA").setColor(0xaa0000)
+    .setDescription(`**${meu.name}** [${meu.tag}] declarou guerra contra **${alvo.name}** [${alvo.tag}].`)
+    .addFields(
+      { name: "Custo", value: formatMoney(GANG_WAR_DECLARE_COST) + " (caixa)", inline: true },
+      { name: "Bônus em guerra", value: "• Invadir territórios do inimigo: **custo pela metade**\n• Vitória em invasão: **+10 reputação** (em vez de +5)" },
+      { name: "Como encerrar", value: "`!gpaz` (paga indenização ao inimigo)" },
+    );
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["gpaz", "pedirpaz"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (!p.gangId || p.gangRank !== "lider") return reply(msg, "❌ Só o líder pede paz.");
+  const meu = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, p.gangId) });
+  if (!meu || !meu.isAtWar || !meu.warTarget) return reply(msg, "🕊️ Sua gangue não está em guerra.");
+  const inimigo = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, meu.warTarget) });
+  if (!inimigo) {
+    await db.update(schema.gangs).set({ isAtWar: false, warTarget: null, warStarted: null }).where(eq(schema.gangs.id, meu.id));
+    return reply(msg, "✅ Estado de guerra órfão limpo (a gangue inimiga não existe mais).");
+  }
+  if (meu.bankBalance < GANG_WAR_PEACE_COST) return reply(msg, `❌ Indenização de paz custa ${formatMoney(GANG_WAR_PEACE_COST)} do caixa (você tem ${formatMoney(meu.bankBalance)}).`);
+  await db.update(schema.gangs).set({
+    bankBalance: meu.bankBalance - GANG_WAR_PEACE_COST,
+    isAtWar: false, warTarget: null, warStarted: null,
+  }).where(eq(schema.gangs.id, meu.id));
+  await db.update(schema.gangs).set({
+    bankBalance: inimigo.bankBalance + GANG_WAR_PEACE_COST,
+    isAtWar: false, warTarget: null, warStarted: null,
+  }).where(eq(schema.gangs.id, inimigo.id));
+  await logTransaction(meu.id, inimigo.id, GANG_WAR_PEACE_COST, "war_peace", `Paz com ${inimigo.name}`);
+  return reply(msg, `🕊️ Paz com **${inimigo.name}** [${inimigo.tag}]. ${formatMoney(GANG_WAR_PEACE_COST)} pagos como indenização.`);
+});
+
+reg(["gguerras", "guerras"], async (msg) => {
+  const all = await db.query.gangs.findMany();
+  const gMap: Record<string, typeof all[number]> = {};
+  for (const g of all) gMap[g.id] = g;
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const g of all) {
+    if (!g.isAtWar || !g.warTarget) continue;
+    if (seen.has(g.id)) continue;
+    seen.add(g.id);
+    seen.add(g.warTarget);
+    const inimigo = gMap[g.warTarget];
+    const dur = g.warStarted ? Math.floor((Date.now() - g.warStarted.getTime()) / (60 * 60 * 1000)) : 0;
+    lines.push(`⚔️ **${g.name}** [${g.tag}] vs **${inimigo?.name ?? "?"}** [${inimigo?.tag ?? "?"}] — ${dur}h em conflito`);
+  }
+  if (lines.length === 0) return reply(msg, "🕊️ Nenhuma guerra ativa no momento.");
+  return reply(msg, { embeds: [new EmbedBuilder().setTitle("⚔️ Guerras de Facção Ativas").setColor(0xaa0000).setDescription(lines.join("\n"))] });
 });
 
 reg(["gtrabalhar", "gwork"], async (msg) => {
@@ -1417,7 +1512,6 @@ reg(["invadir", "tomarterr"], async (msg, args) => {
   if (!id) return reply(msg, "❌ Uso: `!invadir <id>` — veja `!terr`.");
   const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
   if (!p.gangId) return reply(msg, "❌ Precisa estar em gangue.");
-  if (p.balance < TERR_INVADE_COST) return reply(msg, `❌ Invadir custa ${formatMoney(TERR_INVADE_COST)} (logística/armas).`);
   const t = await db.query.territories.findFirst({ where: eq(schema.territories.id, id) });
   if (!t) return reply(msg, "❌ Território não existe.");
   if (t.controlledBy === p.gangId) return reply(msg, "✋ Sua gangue já controla esse território.");
@@ -1425,38 +1519,40 @@ reg(["invadir", "tomarterr"], async (msg, args) => {
   const meuG = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, p.gangId) });
   if (!meuG) return reply(msg, "❌ Gangue sumiu.");
 
-  await removeMoney(p.discordId, TERR_INVADE_COST);
+  // Bônus de guerra: invadindo território da gangue inimiga, custo cai pela metade.
+  const emGuerraComDono = !!(meuG.isAtWar && meuG.warTarget && t.controlledBy && meuG.warTarget === t.controlledBy);
+  const custo = emGuerraComDono ? Math.floor(TERR_INVADE_COST / 2) : TERR_INVADE_COST;
+  if (p.balance < custo) return reply(msg, `❌ Invadir custa ${formatMoney(custo)} (logística/armas).${emGuerraComDono ? " Bônus de guerra aplicado." : ""}`);
+  await removeMoney(p.discordId, custo);
 
   // Força = membros + reputação/10 (atacante) vs defensor (mesma fórmula × defenseBonus)
   const meuPoder = meuG.memberCount + meuG.reputation / 10;
   let defPoder = 5; // território livre tem leve resistência local
   let defNome = "garrison local";
+  let inimigoG: typeof meuG | undefined;
   if (t.controlledBy) {
-    const inimigo = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, t.controlledBy) });
-    if (inimigo) {
-      defPoder = (inimigo.memberCount + inimigo.reputation / 10) * t.defenseBonus;
-      defNome = `[${inimigo.tag}] ${inimigo.name}`;
+    inimigoG = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, t.controlledBy) });
+    if (inimigoG) {
+      defPoder = (inimigoG.memberCount + inimigoG.reputation / 10) * t.defenseBonus;
+      defNome = `[${inimigoG.tag}] ${inimigoG.name}`;
     }
   }
   const chance = Math.max(0.15, Math.min(0.85, meuPoder / (meuPoder + defPoder)));
   const sucesso = Math.random() < chance;
 
   if (!sucesso) {
-    // Defensor recebe metade do custo como compensação no caixa
-    if (t.controlledBy) {
-      const inimigo = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, t.controlledBy) });
-      if (inimigo) {
-        const pillage = Math.floor(TERR_INVADE_COST / 2);
-        await db.update(schema.gangs).set({ bankBalance: inimigo.bankBalance + pillage }).where(eq(schema.gangs.id, inimigo.id));
-      }
+    if (inimigoG) {
+      const pillage = Math.floor(custo / 2);
+      await db.update(schema.gangs).set({ bankBalance: inimigoG.bankBalance + pillage }).where(eq(schema.gangs.id, inimigoG.id));
     }
     await updatePlayer(p.discordId, { health: Math.max(1, p.health - 20) });
-    return reply(msg, `❌ Invasão de **${t.name}** fracassou contra ${defNome} (chance ${(chance * 100).toFixed(0)}%). Você perdeu ${formatMoney(TERR_INVADE_COST)} e 20 de saúde.`);
+    return reply(msg, `❌ Invasão de **${t.name}** fracassou contra ${defNome} (chance ${(chance * 100).toFixed(0)}%). Perdeu ${formatMoney(custo)} e 20 HP.${emGuerraComDono ? " (custo já reduzido por guerra)" : ""}`);
   }
 
   await db.update(schema.territories).set({ controlledBy: p.gangId, lastCollected: new Date() }).where(eq(schema.territories.id, id));
-  await db.update(schema.gangs).set({ reputation: meuG.reputation + 5 }).where(eq(schema.gangs.id, meuG.id));
-  return reply(msg, `🏴 Sua gangue **${meuG.name}** tomou **${t.name}** de ${defNome}! +5 reputação. Use \`!terrcoletar\` pra render.`);
+  const repGain = emGuerraComDono ? 10 : 5;
+  await db.update(schema.gangs).set({ reputation: meuG.reputation + repGain }).where(eq(schema.gangs.id, meuG.id));
+  return reply(msg, `🏴 **${meuG.name}** tomou **${t.name}** de ${defNome}! +${repGain} reputação${emGuerraComDono ? " (bônus de guerra)" : ""}. Use \`!terrcoletar\` para render.`);
 });
 
 // ============ BOLSA / EMPRESA / POLITICA (compactos) ============
@@ -3099,36 +3195,73 @@ reg(["plantios_d", "plantiosd", "minhasplantas"], async (msg) => {
     const total = def.growMinutes * 60 * 1000;
     const restante = Math.max(0, total - ms);
     const pronto = restante === 0;
-    return `\`#${x.id}\` ${def.emoji} ${def.name} — ${pronto ? "**PRONTA** (use `!colher_d`)" : `${Math.ceil(restante / 60000)} min`}`;
+    return `\`#${x.id}\` ${def.emoji} ${def.name} — ${pronto ? `✅ **PRONTA** — \`!colher_d ${x.id}\`` : `⏳ ${Math.ceil(restante / 60000)} min`}`;
   });
-  return reply(msg, { embeds: [new EmbedBuilder().setTitle("🌱 Seus plantios ilegais").setColor(0x335533).setDescription(lines.join("\n"))] });
+  const e = new EmbedBuilder().setTitle("🌱 Seus plantios ilegais").setColor(0x335533).setDescription(lines.join("\n"))
+    .setFooter({ text: "Dica: !colher_d sem ID colhe TODOS os prontos de uma vez (1 risco de batida por tipo)." });
+  return reply(msg, { embeds: [e] });
 });
 
+// !colher_d <id>  → colhe um plantio específico
+// !colher_d       → colhe TODOS os plantios prontos (1 risco de batida por tipo de droga)
 reg(["colher_d", "colherd", "colherdroga"], async (msg, args) => {
   const id = intArg(args, 0);
-  if (!id) return reply(msg, "❌ Uso: `!colher_d <id>` (veja em `!plantios_d`)");
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
-  const plantios = _plantios(p);
-  const planta = plantios.find(x => x.id === id);
-  if (!planta) return reply(msg, "❌ Plantio não existe.");
-  const def = DROGAS[planta.droga]!;
-  const ready = _now() - planta.plantedAt >= def.growMinutes * 60 * 1000;
-  if (!ready) return reply(msg, "⏳ Ainda não está pronta. Veja `!plantios_d`.");
+  let p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  const todos = _plantios(p);
+  if (todos.length === 0) return reply(msg, "🌱 Sem plantios. Use `!plantar_d <droga>`.");
 
-  // Risco de batida na hora da colheita
-  const raid = await _checkRaid(p, planta.droga);
-  if (raid?.raided) {
-    return reply(msg, `🚔 **BATIDA POLICIAL!** Perdeu ${raid.lostQty} plantio(s) de ${def.name} e levou +${raid.jail ? 2 : 1} ⭐ procurado.${raid.jail ? " Foi preso por 25min." : ""}`);
+  let alvos: Array<{ id: number; droga: string; plantedAt: number }>;
+  if (id) {
+    const planta = todos.find(x => x.id === id);
+    if (!planta) return reply(msg, `❌ Plantio \`#${id}\` não existe. Veja \`!plantios_d\`.`);
+    const def0 = DROGAS[planta.droga];
+    if (!def0) return reply(msg, "❌ Tipo de droga inválido nesse plantio (corrompido).");
+    if (_now() - planta.plantedAt < def0.growMinutes * 60 * 1000) {
+      const restMin = Math.ceil((def0.growMinutes * 60 * 1000 - (_now() - planta.plantedAt)) / 60000);
+      return reply(msg, `⏳ Plantio \`#${id}\` ainda não está pronto (${restMin} min restantes).`);
+    }
+    alvos = [planta];
+  } else {
+    alvos = todos.filter(x => {
+      const d = DROGAS[x.droga];
+      return d && _now() - x.plantedAt >= d.growMinutes * 60 * 1000;
+    });
+    if (alvos.length === 0) return reply(msg, "⏳ Nenhum plantio pronto ainda. Veja `!plantios_d`.");
   }
 
-  const inv = _inv(p);
-  const drogas = _drogasInv(p);
-  drogas[planta.droga] = (drogas[planta.droga] ?? 0) + 1;
-  inv._drogas = drogas;
-  inv._droga_plantios = plantios.filter(x => x.id !== id);
-  bumpInf(inv, "raids_sobreviveu");
-  await updatePlayer(p.discordId, { inventory: inv });
-  return reply(msg, `${def.emoji} Colheu 1× **${def.name}** (in natura). Processe no laboratório com \`!processar ${def.key}\`.`);
+  // Agrupa por tipo de droga (1 risco de batida por tipo)
+  const porDroga = new Map<string, typeof alvos>();
+  for (const a of alvos) {
+    const list = porDroga.get(a.droga) ?? [];
+    list.push(a);
+    porDroga.set(a.droga, list);
+  }
+
+  const partes: string[] = [];
+  for (const [droga, items] of porDroga) {
+    // Recarrega antes do risco pra trabalhar com estado fresco (raid pode mutar a DB)
+    p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+    const def = DROGAS[droga]!;
+    const raid = await _checkRaid(p, droga);
+    if (raid?.raided) {
+      partes.push(`🚔 **BATIDA** em ${def.emoji} ${def.name} — perdeu ${raid.lostQty} plantio(s), +${raid.jail ? 2 : 1}⭐ procurado${raid.jail ? " e foi preso por 25min" : ""}.`);
+      continue;
+    }
+    // Sem batida: re-lê o jogador (pra incluir mutações de bancos/etc anteriores) e colhe
+    p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+    const inv = _inv(p);
+    const drogas = _drogasInv(p);
+    const plantNow = _plantios(p);
+    const ids = new Set(items.map(i => i.id));
+    drogas[droga] = (drogas[droga] ?? 0) + items.length;
+    inv._drogas = drogas;
+    inv._droga_plantios = plantNow.filter(x => !ids.has(x.id));
+    bumpInf(inv, "raids_sobreviveu");
+    await updatePlayer(p.discordId, { inventory: inv });
+    partes.push(`${def.emoji} Colheu **${items.length}× ${def.name}** (in natura) — processar com \`!processar ${def.key}\`.`);
+  }
+
+  return reply(msg, partes.join("\n"));
 });
 
 reg(["processar"], async (msg, args) => {
@@ -3978,6 +4111,7 @@ reg(["ajuda", "help", "comandos"], async (msg) => {
       { name: "🏦 Tesouraria", value: "`!gbanco` (vê caixa) · `!gdepositar <v>` (qualquer membro doa) · `!gpagar @membro <v>` (só líder)" },
       { name: "🤝 Trampo da gangue", value: "`!gtrabalhar` (1h cd) — 70% pro membro, 30% pro caixa, bônus por território controlado e nível" },
       { name: "🗺️ Territórios", value: "`!terr` (mapa) · `!invadir <id>` (custa R$ 5.000, baseado em força+rep) · `!terrcoletar` (renda acumulada vai pro caixa)" },
+      { name: "⚔️ Guerra de facções", value: "`!gguerra <tag|@membro>` (custo R$ 10.000 do caixa, só líder) · `!gpaz` (custo R$ 5.000 → vai pro inimigo) · `!gguerras` (lista guerras ativas)\nBônus em guerra: invadir território do inimigo custa metade e dá +10 rep." },
     ],
   ));
 
