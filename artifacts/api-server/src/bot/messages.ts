@@ -1,5 +1,5 @@
 import type { Client, Message, TextChannel } from "discord.js";
-import { EmbedBuilder } from "discord.js";
+import { EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder, ComponentType } from "discord.js";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { db, schema } from "./systems/db.js";
 import {
@@ -245,19 +245,30 @@ reg(["banco"], async (msg) => {
 
 reg(["pix", "transferir"], async (msg, args) => {
   const targetId = getMentionId(msg, args, 0);
-  const v = intArg(args, msg.mentions.users.size > 0 ? 0 : 1);
-  if (!targetId || !v) return reply(msg, "❌ Uso: `!pix @user <valor>`");
+  if (!targetId) return reply(msg, "❌ Uso: `!pix @user <valor>`");
+  // Pega o primeiro argumento que não seja menção/ID — assim funciona com `!pix @user 100`,
+  // `!pix 100 @user`, ou `!pix <discordId> 100`.
+  let v: number | null = null;
+  for (const a of args) {
+    if (!a) continue;
+    if (/^<@!?\d+>$/.test(a)) continue;       // menção bruta <@123>
+    if (/^\d{15,22}$/.test(a)) continue;      // discord snowflake
+    const n = parseInt(a.replace(/[^\d]/g, ""), 10);
+    if (Number.isFinite(n) && n > 0) { v = n; break; }
+  }
+  if (!v || v <= 0) return reply(msg, "❌ Uso: `!pix @user <valor>` — valor deve ser positivo.");
   if (targetId === msg.author.id) return reply(msg, "❌ Não pode transferir para si.");
   const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
-  if (p.balance < v) return reply(msg, "❌ Saldo insuficiente.");
+  if (p.balance < v) return reply(msg, `❌ Saldo insuficiente. Você tem ${formatMoney(p.balance)} e tentou enviar ${formatMoney(v)}.`);
   const eco = await getEconomy();
   const tax = Math.floor(v * eco.taxRate);
   const net = v - tax;
-  const target = await getOrCreatePlayer(targetId, msg.mentions.users.first()?.username ?? "user");
+  const targetUser = msg.mentions.users.first();
+  const target = await getOrCreatePlayer(targetId, targetUser?.username ?? "user");
   await updatePlayer(p.discordId, { balance: p.balance - v });
   await updatePlayer(target.discordId, { balance: target.balance + net });
   await logTransaction(p.discordId, target.discordId, net, "transfer", `PIX (imposto ${formatMoney(tax)})`);
-  return reply(msg, `✅ Enviou ${formatMoney(v)} → recebido ${formatMoney(net)} (imposto ${formatMoney(tax)}).`);
+  return reply(msg, `✅ PIX de ${formatMoney(v)} enviado para <@${target.discordId}> · líquido recebido ${formatMoney(net)} (imposto ${formatMoney(tax)}).\n💼 Seu novo saldo: ${formatMoney(p.balance - v)}.`);
 });
 
 reg(["work", "trabalhar"], async (msg) => {
@@ -977,6 +988,102 @@ reg(["glista"], async (msg) => {
   return reply(msg, all.map(g => `🏴 [${g.tag}] ${g.name} — ${g.memberCount} membros`).join("\n"));
 });
 
+// ============ ECONOMIA DA GANGUE ============
+
+const GANG_TREASURY_CUT = 0.30;     // 30% do gtrabalhar pra tesouraria
+const GANG_WORK_COOLDOWN_MS = 60 * 60 * 1000;
+const TERR_INVADE_COST = 5000;
+const TERR_INCOME_CAP_HOURS = 24;   // teto de acúmulo (evita exploit)
+
+reg(["gbanco", "gtesouraria"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (!p.gangId) return reply(msg, "❌ Você não está em nenhuma gangue.");
+  const g = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, p.gangId) });
+  if (!g) return reply(msg, "❌ Gangue não encontrada.");
+  const territs = await db.query.territories.findMany({ where: eq(schema.territories.controlledBy, g.id) });
+  const rendaHora = territs.reduce((s, t) => s + t.passiveIncome, 0);
+  const e = new EmbedBuilder().setTitle(`🏦 Tesouraria — ${g.name} [${g.tag}]`).setColor(0x224422)
+    .addFields(
+      { name: "💰 Caixa da gangue", value: formatMoney(g.bankBalance), inline: true },
+      { name: "🗺️ Territórios", value: `${territs.length}`, inline: true },
+      { name: "📈 Renda passiva", value: `${formatMoney(rendaHora)}/h`, inline: true },
+      { name: "👥 Membros", value: `${g.memberCount}`, inline: true },
+      { name: "Como entra dinheiro?", value: "• `!gdepositar <v>` (qualquer membro)\n• `!gtrabalhar` (30% vai pro caixa, 70% pro membro)\n• `!terrcoletar` (renda acumulada dos territórios)" },
+      { name: "Como sai?", value: "• `!gpagar @membro <v>` (só líder)" },
+    );
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["gdepositar", "gdoar"], async (msg, args) => {
+  const v = intArg(args, 0);
+  if (!v) return reply(msg, "❌ Uso: `!gdepositar <valor>`");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (!p.gangId) return reply(msg, "❌ Sem gangue.");
+  if (p.balance < v) return reply(msg, `❌ Saldo insuficiente. Tem ${formatMoney(p.balance)}.`);
+  const g = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, p.gangId) });
+  if (!g) return reply(msg, "❌ Gangue não existe.");
+  await removeMoney(p.discordId, v);
+  await db.update(schema.gangs).set({ bankBalance: g.bankBalance + v }).where(eq(schema.gangs.id, g.id));
+  return reply(msg, `🏦 ${formatMoney(v)} doados para a tesouraria de **${g.name}**. Caixa agora: ${formatMoney(g.bankBalance + v)}.`);
+});
+
+reg(["gpagar", "gpag"], async (msg, args) => {
+  const tid = getMentionId(msg, args, 0);
+  const v = intArg(args, msg.mentions.users.size > 0 ? 1 : 1);
+  if (!tid || !v) return reply(msg, "❌ Uso: `!gpagar @membro <valor>` (só o líder, sai do caixa da gangue).");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (!p.gangId || p.gangRank !== "lider") return reply(msg, "❌ Só o líder paga.");
+  const t = await getPlayer(tid);
+  if (!t || t.gangId !== p.gangId) return reply(msg, "❌ Alvo não é da sua gangue.");
+  const g = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, p.gangId) });
+  if (!g) return reply(msg, "❌ Gangue não encontrada.");
+  if (g.bankBalance < v) return reply(msg, `❌ Caixa só tem ${formatMoney(g.bankBalance)}.`);
+  await db.update(schema.gangs).set({ bankBalance: g.bankBalance - v }).where(eq(schema.gangs.id, g.id));
+  await addMoney(t.discordId, v);
+  await logTransaction(g.id, t.discordId, v, "gang_pay", `Pagamento da gangue ${g.name}`);
+  return reply(msg, `💸 Líder pagou ${formatMoney(v)} para <@${t.discordId}>. Caixa restante: ${formatMoney(g.bankBalance - v)}.`);
+});
+
+reg(["gtrabalhar", "gwork"], async (msg) => {
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (!p.gangId) return reply(msg, "❌ Precisa estar em gangue. Veja `!glista` ou `!gcriar`.");
+  if (isJailed(p) || isHospitalized(p) || isDead(p)) return reply(msg, "❌ Você não pode trabalhar agora.");
+  const inv: any = { ...(p.inventory ?? {}) };
+  const last = (inv._last_gwork as number) ?? 0;
+  const cd = GANG_WORK_COOLDOWN_MS - (Date.now() - last);
+  if (cd > 0) return reply(msg, `⏳ Próximo serviço da gangue em ${formatCooldown(cd)}.`);
+  const g = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, p.gangId) });
+  if (!g) return reply(msg, "❌ Gangue não encontrada.");
+  const territs = await db.query.territories.findMany({ where: eq(schema.territories.controlledBy, g.id) });
+
+  const lvl = getPlayerLevel(p);
+  const base = 250 + Math.floor(Math.random() * 350);
+  const bonusTerr = territs.length * 180;
+  const bonusLvl = lvl * 60;
+  const bonusRep = Math.max(0, Math.floor(g.reputation * 0.5));
+  const total = base + bonusTerr + bonusLvl + bonusRep;
+  const cutGang = Math.floor(total * GANG_TREASURY_CUT);
+  const paraMembro = total - cutGang;
+
+  await db.update(schema.gangs).set({ bankBalance: g.bankBalance + cutGang, reputation: g.reputation + 1 }).where(eq(schema.gangs.id, g.id));
+  inv._last_gwork = Date.now();
+  await updatePlayer(p.discordId, { balance: p.balance + paraMembro, inventory: inv });
+  await logTransaction(g.id, p.discordId, paraMembro, "gang_work", `Serviço da gangue ${g.name}`);
+  await addXp(p.discordId, 12);
+
+  const tarefas = [
+    "vigiou o ponto da boca",
+    "cobrou pedágio na esquina",
+    "fez entrega pra um cliente VIP",
+    "intimidou um devedor",
+    "patrulhou o território",
+    "armou bloqueio na pista",
+    "deu cobertura num corre",
+  ];
+  const tarefa = tarefas[Math.floor(Math.random() * tarefas.length)];
+  return reply(msg, `🤝 Você ${tarefa} para **${g.name}** e ganhou ${formatMoney(paraMembro)}. Caixa da gangue +${formatMoney(cutGang)} (territórios: ${territs.length}, nível: ${lvl}).`);
+});
+
 // ============ CARROS ============
 reg(["autos", "concessionaria"], async (msg) => {
   const e = new EmbedBuilder().setTitle("🚗 Concessionária").setColor(0x336699);
@@ -1260,22 +1367,96 @@ reg(["divorciar"], async (msg) => {
 });
 
 // ============ TERRITÓRIOS GANGUE ============
-reg(["terr", "territorios"], async (msg) => {
+
+function _accruedTerr(t: { passiveIncome: number; lastCollected: Date | null }): { hours: number; total: number } {
+  const since = t.lastCollected ? t.lastCollected.getTime() : Date.now() - 60 * 60 * 1000;
+  const hoursRaw = (Date.now() - since) / (60 * 60 * 1000);
+  const hours = Math.min(TERR_INCOME_CAP_HOURS, Math.max(0, hoursRaw));
+  return { hours, total: Math.floor(hours * t.passiveIncome) };
+}
+
+reg(["terr", "territorios", "mapa"], async (msg) => {
   const ts = await db.query.territories.findMany();
-  return reply(msg, ts.map(t => `🗺️ #${t.id} ${t.name} — ${t.controlledBy ? `controlado` : "livre"} · renda ${formatMoney(t.passiveIncome)}/h`).join("\n"));
+  if (ts.length === 0) return reply(msg, "🗺️ Nenhum território cadastrado ainda.");
+  const gangsAll = await db.query.gangs.findMany();
+  const gMap: Record<string, typeof gangsAll[number]> = {};
+  for (const g of gangsAll) gMap[g.id] = g;
+  const lines = ts.map(t => {
+    const ctrl = t.controlledBy ? gMap[t.controlledBy] : null;
+    const ac = _accruedTerr(t);
+    const status = ctrl ? `🏴 [${ctrl.tag}] ${ctrl.name}` : "⚪ livre";
+    return `\`#${t.id}\` **${t.name}** — ${status}\n   📈 ${formatMoney(t.passiveIncome)}/h · 💰 acumulado ${formatMoney(ac.total)} (${ac.hours.toFixed(1)}h, teto ${TERR_INCOME_CAP_HOURS}h)`;
+  });
+  const e = new EmbedBuilder().setTitle("🗺️ Mapa de Territórios").setColor(0x336633)
+    .setDescription(lines.join("\n\n"))
+    .setFooter({ text: `Coletar acumulado: !terrcoletar · Invadir: !invadir <id> (custa ${formatMoney(TERR_INVADE_COST)})` });
+  return reply(msg, { embeds: [e] });
 });
 
-reg(["invadir"], async (msg, args) => {
-  const id = intArg(args, 0);
-  if (!id) return reply(msg, "❌ Uso: `!invadir <id>`");
+reg(["terrcoletar", "coletarterr", "tcoletar"], async (msg) => {
   const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
   if (!p.gangId) return reply(msg, "❌ Precisa estar em gangue.");
+  const ts = await db.query.territories.findMany({ where: eq(schema.territories.controlledBy, p.gangId) });
+  if (ts.length === 0) return reply(msg, "🗺️ Sua gangue não controla nenhum território. Use `!terr` e `!invadir <id>`.");
+  let total = 0;
+  for (const t of ts) {
+    const ac = _accruedTerr(t);
+    total += ac.total;
+    await db.update(schema.territories).set({ lastCollected: new Date() }).where(eq(schema.territories.id, t.id));
+  }
+  if (total <= 0) return reply(msg, "💤 Nenhuma renda acumulada ainda. Espere mais um pouco.");
+  const g = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, p.gangId) });
+  if (!g) return reply(msg, "❌ Gangue sumiu.");
+  await db.update(schema.gangs).set({ bankBalance: g.bankBalance + total }).where(eq(schema.gangs.id, g.id));
+  await logTransaction(null, g.id, total, "territory_collect", `Coleta de ${ts.length} território(s)`);
+  return reply(msg, `💰 Coletado ${formatMoney(total)} de ${ts.length} território(s) para o caixa de **${g.name}**. Use \`!gbanco\`.`);
+});
+
+reg(["invadir", "tomarterr"], async (msg, args) => {
+  const id = intArg(args, 0);
+  if (!id) return reply(msg, "❌ Uso: `!invadir <id>` — veja `!terr`.");
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (!p.gangId) return reply(msg, "❌ Precisa estar em gangue.");
+  if (p.balance < TERR_INVADE_COST) return reply(msg, `❌ Invadir custa ${formatMoney(TERR_INVADE_COST)} (logística/armas).`);
   const t = await db.query.territories.findFirst({ where: eq(schema.territories.id, id) });
   if (!t) return reply(msg, "❌ Território não existe.");
-  const success = Math.random() < 0.5;
-  if (!success) return reply(msg, "❌ Invasão fracassou.");
+  if (t.controlledBy === p.gangId) return reply(msg, "✋ Sua gangue já controla esse território.");
+
+  const meuG = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, p.gangId) });
+  if (!meuG) return reply(msg, "❌ Gangue sumiu.");
+
+  await removeMoney(p.discordId, TERR_INVADE_COST);
+
+  // Força = membros + reputação/10 (atacante) vs defensor (mesma fórmula × defenseBonus)
+  const meuPoder = meuG.memberCount + meuG.reputation / 10;
+  let defPoder = 5; // território livre tem leve resistência local
+  let defNome = "garrison local";
+  if (t.controlledBy) {
+    const inimigo = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, t.controlledBy) });
+    if (inimigo) {
+      defPoder = (inimigo.memberCount + inimigo.reputation / 10) * t.defenseBonus;
+      defNome = `[${inimigo.tag}] ${inimigo.name}`;
+    }
+  }
+  const chance = Math.max(0.15, Math.min(0.85, meuPoder / (meuPoder + defPoder)));
+  const sucesso = Math.random() < chance;
+
+  if (!sucesso) {
+    // Defensor recebe metade do custo como compensação no caixa
+    if (t.controlledBy) {
+      const inimigo = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, t.controlledBy) });
+      if (inimigo) {
+        const pillage = Math.floor(TERR_INVADE_COST / 2);
+        await db.update(schema.gangs).set({ bankBalance: inimigo.bankBalance + pillage }).where(eq(schema.gangs.id, inimigo.id));
+      }
+    }
+    await updatePlayer(p.discordId, { health: Math.max(1, p.health - 20) });
+    return reply(msg, `❌ Invasão de **${t.name}** fracassou contra ${defNome} (chance ${(chance * 100).toFixed(0)}%). Você perdeu ${formatMoney(TERR_INVADE_COST)} e 20 de saúde.`);
+  }
+
   await db.update(schema.territories).set({ controlledBy: p.gangId, lastCollected: new Date() }).where(eq(schema.territories.id, id));
-  return reply(msg, `🏴 Sua gangue tomou ${t.name}!`);
+  await db.update(schema.gangs).set({ reputation: meuG.reputation + 5 }).where(eq(schema.gangs.id, meuG.id));
+  return reply(msg, `🏴 Sua gangue **${meuG.name}** tomou **${t.name}** de ${defNome}! +5 reputação. Use \`!terrcoletar\` pra render.`);
 });
 
 // ============ BOLSA / EMPRESA / POLITICA (compactos) ============
@@ -1790,7 +1971,7 @@ reg(["apurar", "encerrar_eleicao"], async (msg) => {
 });
 
 // COMPRA DE VOTOS — usa orçamento político do candidato no poder
-reg(["comprarvoto", "subornar"], async (msg, args) => {
+reg(["comprarvoto"], async (msg, args) => {
   const tid = getMentionId(msg, args, 0);
   const v = intArg(args, msg.mentions.users.size > 0 ? 0 : 1);
   if (!tid || !v) return reply(msg, "❌ Uso: `!comprarvoto @user <valor>` — paga o usuário e força o voto dele em você na eleição ativa.");
@@ -2671,7 +2852,7 @@ reg(["econstruir", "construirfabrica"], async (msg) => {
   return reply(msg, `🏭 Fábrica de **${branch?.name}** construída no nível 1! Já pode \`!efabricar\` os produtos básicos do ramo.`);
 });
 
-reg(["eupgradefabrica", "eupfabrica", "eupgrade"], async (msg) => {
+reg(["eupgradefabrica", "eupfabrica"], async (msg) => {
   const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
   const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
   if (!c) return reply(msg, "❌ Você não tem empresa.");
@@ -3665,67 +3846,255 @@ reg(["topinfamia", "topsalafrarios"], async (msg) => {
   return reply(msg, { embeds: [new EmbedBuilder().setTitle("🏴‍☠️ Top 10 Salafrários").setColor(0x550044).setDescription(lines.join("\n"))] });
 });
 
+// ============ AJUDA PAGINADA ============
+
+function _helpPage(title: string, color: number, desc: string, fields: Array<{ name: string; value: string }>): EmbedBuilder {
+  const e = new EmbedBuilder().setTitle(title).setColor(color).setDescription(desc);
+  if (fields.length) e.addFields(fields);
+  return e;
+}
+
+async function _paginateHelp(msg: Message, pages: EmbedBuilder[]) {
+  if (pages.length === 0) return;
+  let idx = 0;
+  const buildRow = (i: number) => new ActionRowBuilder<ButtonBuilder>().setComponents(
+    new ButtonBuilder().setCustomId("hp_prev").setLabel("◀").setStyle(ButtonStyle.Secondary).setDisabled(i === 0),
+    new ButtonBuilder().setCustomId("hp_page").setLabel(`${i + 1}/${pages.length}`).setStyle(ButtonStyle.Primary).setDisabled(true),
+    new ButtonBuilder().setCustomId("hp_next").setLabel("▶").setStyle(ButtonStyle.Secondary).setDisabled(i >= pages.length - 1),
+    new ButtonBuilder().setCustomId("hp_close").setLabel("✖").setStyle(ButtonStyle.Danger),
+  );
+  pages.forEach((p, i) => p.setFooter({ text: `Página ${i + 1} de ${pages.length} · sessão expira em 5min` }));
+  const ch = msg.channel as TextChannel;
+  const sent = await ch.send({ embeds: [pages[idx]!], components: [buildRow(idx)] }).catch(() => null);
+  if (!sent) return;
+  const collector = sent.createMessageComponentCollector({ componentType: ComponentType.Button, time: 5 * 60 * 1000 });
+  collector.on("collect", async (i: any) => {
+    if (i.user.id !== msg.author.id) {
+      await i.reply({ content: "✋ Esse menu é de quem chamou. Use `!ajuda` por conta própria.", ephemeral: true }).catch(() => {});
+      return;
+    }
+    if (i.customId === "hp_close") {
+      await i.update({ components: [] }).catch(() => {});
+      collector.stop();
+      return;
+    }
+    if (i.customId === "hp_next") idx = Math.min(pages.length - 1, idx + 1);
+    if (i.customId === "hp_prev") idx = Math.max(0, idx - 1);
+    await i.update({ embeds: [pages[idx]!], components: [buildRow(idx)] }).catch(() => {});
+  });
+  collector.on("end", () => { sent.edit({ components: [] }).catch(() => {}); });
+}
+
 reg(["ajuda", "help", "comandos"], async (msg) => {
-  const e1 = new EmbedBuilder().setTitle("📖 Comandos — Prefixo `!`").setColor(0x5865f2)
-    .setDescription("Todos os comandos usam **!** no início. Não tem mais slash.")
-    .addFields(
-      { name: "💰 Economia", value: "`!saldo` `!banco` `!dep <v>` `!sac <v>` `!pix @user <v>` `!work` `!sal`" },
-      { name: "🎁 Recompensas", value: "`!day` `!week` `!bonus`" },
-      { name: "🛒 Loja", value: "`!loja` `!comprar <item> [qtd]` `!inv`" },
-      { name: "🪪 Personagem", value: "`!perfil <UF> <cidade> <gen> <pol>` `!rg [@user]`" },
-      { name: "👔 Profissão", value: "`!profs` · `!curso <nome>` · `!sal`" },
-      { name: "❤️ Saúde", value: "`!saude` `!hospital` `!seguro` `!curar @user` `!defender @user`" },
-      { name: "🦹 Crime", value: "`!crime <tipo>` `!roubar @user` `!ficha` `!prender @user [min]` `!fugir`" },
-      { name: "🌾 Fazenda Vegetal", value: "`!plantar <semente>` `!plant` `!colher`" },
-      { name: "🐄 Fazenda Animal", value: "`!fazenda` `!animal <esp> [nome]` `!alimentar <id>` `!abater <id>`" },
-      { name: "🪴 Slots da Fazenda", value: "`!comprarslot planta` · `!comprarslot animal`" },
-    );
-  const e2 = new EmbedBuilder().setColor(0x5865f2).addFields(
-      { name: "🎰 Cassino", value: "`!slot <v>` `!roleta <cor> <v>` `!dado <esc> <v> [n]` `!bicho <1-25> <v>`" },
-      { name: "🔫 Combate", value: "`!arma loja|vender|equipada` `!compraarma <k>` `!duelo @user`" },
-      { name: "🏴 Gangue", value: "`!gcriar <nome> <tag>` `!ginvitar @user` `!gaceitar` `!grejeitar` `!gconvites` `!gbanir @user` `!gmembros` `!gsair` `!ginfo` `!glista`" },
-      { name: "🗺️ Território", value: "`!terr` `!invadir <id>`" },
-      { name: "🚗 Carros", value: "`!autos` `!comprarauto <m>` `!garagem` `!consertar <id>` `!vendercarro <id>`" },
-      { name: "🏠 Casa", value: "`!casa` `!casacomprar <tipo>` `!casaupgrade <up>` `!coletar`" },
-      { name: "🐾 Pet/Família", value: "`!pet <esp> <nome>` `!pets` `!petfeed` `!petsep` `!casar @user` `!divorciar`" },
-      { name: "📊 Bolsa", value: "`!bolsa` `!bcomprar <SYM> <q>` `!bvender <SYM> <q>` `!carteira`" },
-      { name: "🛠️ Admin/Outros", value: "`!adm dar|tirar|reset @user [v]` `!top` `!ajuda`" },
-    );
-  const e3 = new EmbedBuilder().setColor(0x5865f2).setTitle("📖 Comandos — Parte 3").addFields(
-      { name: "📜 Dívidas/Crédito", value: "`!fiado @user <v> [dias]` `!dividas` `!pagar <id>`" },
-      { name: "⚖️ Falência", value: "`!falir` `!status` `!checkfalencia`" },
-      { name: "⭐ Reputação/Karma", value: "`!rep [@user]`" },
-      { name: "🤔 Escolhas Morais", value: "`!moral`" },
-      { name: "🧾 Imposto", value: "`!ir` · `!sonegar`" },
-      { name: "🕶️ Mercado Negro", value: "`!mn` `!mncomprar <chave>`" },
-      { name: "🎰 Loteria", value: "`!loteria` `!bilhete <1-100>`" },
-      { name: "📊 Eventos Econômicos", value: "`!evento` · admin: `!evento inflacao|recessao|boom|deflacao`" },
-    );
-  const e4 = new EmbedBuilder().setColor(0xff6600).setTitle("📖 Comandos — Novos Sistemas").addFields(
-      { name: "🎛️ Painel Geral", value: "`!dash`" },
-      { name: "📈 Bolsa Detalhada", value: "`!cotacoes` · `!bdetalhe <SYM>`" },
-      { name: "🏛️ Política", value: "`!governo` `!leis` · admin: `!eleicao <presidente|prefeito>` · `!candidatar` `!votar @user` `!apurar` · `!proporlei <efeito> <nome>` · `!comprarvoto @user <v>`" },
-      { name: "🏁 Racha de Carros", value: "`!racha <valor> @user`" },
-      { name: "💍 Casamento", value: "`!casar @user`" },
-      { name: "🏴 Convite de Gangue", value: "`!ginvitar @user`" },
-      { name: "💼 Empresa", value: "`!empresa` `!ecriar \"<nome>\" <ramo> [desc]` `!econtratar @user` `!edemitir @user` `!epagar` `!eanunciar` `!eexpandir` `!eipo <SYM> <preço>` `!esimular` `!elista` `!eextrato`" },
-      { name: "🏭 Cadeia Produtiva", value: "`!ramos [ramo]` · `!ematerias <mat> [qtd]` · `!emateriais` · `!econstruir` · `!efabrica` · `!eupgradefabrica` · `!efabricar <prodKey> [qtd]` · `!estoque [@dono]`" },
-      { name: "📦 Produtos da Empresa", value: "`!eproduto add fab <prodKey> <preço>` · `!eproduto add \"<nome>\" <preço> <custo>` · `!eproduto rm <id>` · `!eproduto lista [@dono]` · `!ecomprar @dono <id> [qtd]` · `!usar <prodKey>`" },
-      { name: "🛠️ Funcionário", value: "`!etrabalhar` (1h cd, ativa comissão por 24h)" },
-      { name: "⚖️ Impeachment", value: "`!impeachment <presidente|prefeito>` (30 apoiadores ✅ em 3min, confisca orçamento)" },
-      { name: "🧼 Lavagem", value: "`!lavar <valor>`" },
-      { name: "✨ Nível & Animações", value: "`!work` · plantar/colher/animal/racha" },
-    );
-  const e5 = new EmbedBuilder().setColor(0x550044).setTitle("🦝 Ecossistema do Salafrário").setDescription("Do zero ao avançado: tráfico, golpes, suborno, chantagem, sequestro, mercado P2P, vícios, missões e infâmia.").addFields(
-      { name: "🌿 Tráfico de Drogas", value: "`!drogas` `!construir_lab` `!up_lab` `!lab` · `!plantar_d <droga>` `!plantios_d` `!colher_d <id>` · `!processar <droga> [qtd]` · `!estoque_d` · `!traficar @user <prodKey> <qtd> [preço]` · `!consumir_d <prodKey>` · `!desintoxicar`" },
-      { name: "💼 Golpes & Pirâmides", value: "`!golpes` · `!golpe phishing|estelionato|falsoproduto [@alvo]` · `!piramide criar <nome> <entrada>` `!piramide entrar @dono` `!piramide status` `!piramide encerrar`" },
-      { name: "🤝 Suborno & Corrupção", value: "`!subornar policia|juiz|fiscal|prefeito [valor]` · `!subornos`" },
-      { name: "🤐 Chantagem", value: "`!fofoca @user` (descobre sujeira) · `!chantagear @user <valor>` · `!sigilo` (limpa sujeira contra você)" },
-      { name: "🪤 Sequestro", value: "`!sequestrar @user <resgate>` · `!resgatar @vitima` · `!fugir_seq` · `!sequestros`" },
+  const pages: EmbedBuilder[] = [];
+
+  pages.push(_helpPage(
+    "📖 1. Economia & Banco",
+    0x2ecc71,
+    "Dinheiro de bolso, banco, transferências e expediente diário. **Toda operação aqui é em `!`.**",
+    [
+      { name: "💰 Saldos", value: "`!saldo` · `!banco` · `!dep <v>` · `!sac <v>` · `!top` (ranking de fortuna)" },
+      { name: "💸 PIX", value: "`!pix @user <valor>` — paga imposto sobre transferência (fica com `taxRate` do governo)" },
+      { name: "🛠️ Trabalho diário", value: "`!work` (1h cd) · `!sal` (saca salário se tem profissão)" },
+      { name: "🎁 Bônus periódicos", value: "`!day` (24h) · `!week` (7d) · `!bonus` (variado)" },
+      { name: "📜 Crédito", value: "`!fiado @user <v> [dias]` · `!dividas` · `!pagar <id>`" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📖 2. Personagem & Profissão",
+    0x9b59b6,
+    "Sua identidade no servidor — RG, estado, gênero, lado político, profissão e estudos.",
+    [
+      { name: "🪪 Identidade", value: "`!perfil <UF> <cidade> <gen> <pol>` · `!rg [@user]` (vê o RG de alguém)" },
+      { name: "👔 Profissões", value: "`!profs` (lista todas) · `!curso <nome>` (faz faculdade) · `!sal` (recebe salário ao se formar)" },
+      { name: "📊 Painel", value: "`!dash` — visão completa do personagem" },
+      { name: "⭐ Reputação & Karma", value: "`!rep [@user]` — vê reputação e karma" },
+      { name: "🤔 Escolhas Morais", value: "`!moral` — dilema aleatório que afeta karma" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📖 3. Loja, Inventário & Mercado Negro",
+    0xe67e22,
+    "Tudo que você compra, carrega ou troca no submundo.",
+    [
+      { name: "🛒 Loja oficial", value: "`!loja` · `!comprar <item> [qtd]` · `!inv` (inventário)" },
+      { name: "🕶️ Mercado Negro", value: "`!mn` · `!mncomprar <chave>` (acesso depende da ficha criminal)" },
+      { name: "🛒 Mercado P2P", value: "`!mercado` · `!ofertar <itemKey> <qtd> <preço>` · `!comprar_oferta <id>` · `!retirar_oferta <id>` (taxa 5%)" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📖 4. Fazenda Vegetal & Animal",
+    0x27ae60,
+    "Plantio e criação de animais com slots, cultivo, alimentação e abate.",
+    [
+      { name: "🌾 Plantar e colher", value: "`!plantar <semente>` · `!plant` (vê plantios) · `!colher`" },
+      { name: "🐄 Animais", value: "`!fazenda` · `!animal <esp> [nome]` · `!alimentar <id>` · `!abater <id>`" },
+      { name: "🪴 Expandir slots", value: "`!comprarslot planta` · `!comprarslot animal`" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📖 5. Carros & Casa",
+    0x3498db,
+    "Compre carros, faça rachas, gerencie a manutenção. Tenha imóveis com renda passiva.",
+    [
+      { name: "🚗 Concessionária e garagem", value: "`!autos` · `!comprarauto <m>` · `!garagem` · `!consertar <id>` · `!vendercarro <id>`" },
+      { name: "🏁 Racha", value: "`!racha <valor> @user`" },
+      { name: "🏠 Casa", value: "`!casa` · `!casacomprar <tipo>` · `!casaupgrade <up>` · `!coletar` (renda da casa)" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📖 6. Saúde, Pet & Família",
+    0xe74c3c,
+    "Cuide do corpo, do coração e dos bichinhos.",
+    [
+      { name: "❤️ Saúde", value: "`!saude` · `!hospital` · `!seguro` · `!curar @user` · `!defender @user`" },
+      { name: "🐾 Pet", value: "`!pet <esp> <nome>` · `!pets` · `!petfeed` · `!petsep`" },
+      { name: "💍 Família", value: "`!casar @user` · `!divorciar`" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📖 7. Crime, Polícia & Combate",
+    0xc0392b,
+    "Vida fora da lei: pequenos crimes, roubos, prisão, fuga e duelos armados.",
+    [
+      { name: "🦹 Crime", value: "`!crime <tipo>` · `!roubar @user` · `!ficha` (sua ficha criminal) · `!fugir` (cadeia)" },
+      { name: "👮 Polícia", value: "`!prender @user [min]` (depende da função)" },
+      { name: "🔫 Armas e duelos", value: "`!arma loja|vender|equipada` · `!compraarma <k>` · `!duelo @user`" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📖 8. Gangue & Território",
+    0x4b0082,
+    "Crie facção, anexe territórios, monetize a renda passiva e remunere os membros.",
+    [
+      { name: "🏴 Vida na gangue", value: "`!gcriar <nome> <tag>` · `!ginvitar @user` · `!gaceitar` · `!grejeitar` · `!gconvites` · `!gbanir @user` · `!gmembros` · `!gsair` · `!ginfo` · `!glista`" },
+      { name: "🏦 Tesouraria", value: "`!gbanco` (vê caixa) · `!gdepositar <v>` (qualquer membro doa) · `!gpagar @membro <v>` (só líder)" },
+      { name: "🤝 Trampo da gangue", value: "`!gtrabalhar` (1h cd) — 70% pro membro, 30% pro caixa, bônus por território controlado e nível" },
+      { name: "🗺️ Territórios", value: "`!terr` (mapa) · `!invadir <id>` (custa R$ 5.000, baseado em força+rep) · `!terrcoletar` (renda acumulada vai pro caixa)" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📖 9. Empresa & Funcionários",
+    0x16a085,
+    "Abra empresa, contrate funcionários, abra capital na bolsa, anuncie e expanda.",
+    [
+      { name: "💼 CNPJ", value: "`!empresa` · `!ecriar \"<nome>\" <ramo> [desc]` · `!elista` · `!eextrato`" },
+      { name: "👥 Equipe", value: "`!econtratar @user` · `!edemitir @user` · `!epagar` · `!etrabalhar` (funcionário, 1h cd, comissão 24h)" },
+      { name: "📣 Operação", value: "`!eanunciar` · `!eexpandir` · `!esimular` · `!eipo <SYM> <preço>`" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📖 10. Cadeia Produtiva (Materiais → Fábrica → Produtos)",
+    0x1abc9c,
+    "Compre matérias-primas, construa fábrica, fabrique produtos do seu ramo e venda no balcão.",
+    [
+      { name: "🏭 Ramos & matérias", value: "`!ramos [ramo]` · `!ematerias <mat> [qtd]` · `!emateriais`" },
+      { name: "🏗️ Fábrica", value: "`!econstruir` · `!efabrica` · `!eupgradefabrica` · `!efabricar <prodKey> [qtd]` · `!estoque [@dono]`" },
+      { name: "📦 Catálogo de produtos", value: "`!eproduto add fab <prodKey> <preço>` · `!eproduto add \"<nome>\" <preço> <custo>` · `!eproduto rm <id>` · `!eproduto lista [@dono]` · `!ecomprar @dono <id> [qtd]` · `!usar <prodKey>`" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📖 11. Bolsa & Eventos Econômicos",
+    0xf1c40f,
+    "Pregão, ações, IPOs e ciclo macroeconômico.",
+    [
+      { name: "📊 Bolsa", value: "`!bolsa` · `!bcomprar <SYM> <q>` · `!bvender <SYM> <q>` · `!carteira` · `!cotacoes` · `!bdetalhe <SYM>`" },
+      { name: "📈 Eventos", value: "`!evento` (status atual) · admin: `!evento inflacao|recessao|boom|deflacao`" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📖 12. Política, Eleições & Impeachment",
+    0x2980b9,
+    "Disputa pelo poder, leis, financiamento de campanha e queda do governante.",
+    [
+      { name: "🏛️ Estado", value: "`!governo` · `!leis`" },
+      { name: "🗳️ Eleição", value: "admin: `!eleicao <presidente|prefeito>` · `!candidatar` · `!votar @user` · `!apurar`" },
+      { name: "📜 Legislação", value: "`!proporlei <efeito> <nome>`" },
+      { name: "💸 Compra de voto", value: "`!comprarvoto @user <valor>`" },
+      { name: "⚖️ Impeachment", value: "`!impeachment <presidente|prefeito>` (30 ✅ em 3min confiscam orçamento)" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📖 13. Cassino & Loteria",
+    0xff5e5e,
+    "Aposte. Perca. Tente de novo.",
+    [
+      { name: "🎰 Cassino", value: "`!slot <v>` · `!roleta <cor> <v>` · `!dado <esc> <v> [n]` · `!bicho <1-25> <v>`" },
+      { name: "🎟️ Loteria", value: "`!loteria` · `!bilhete <1-100>`" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "🦝 14. SALAFRÁRIO — Tráfico de Drogas",
+    0x556b2f,
+    "Cadeia ilegal completa: planta → laboratório → processa → trafica → consome (vicia) → desintoxica.",
+    [
+      { name: "🌿 Catálogo", value: "`!drogas` (4 tipos: maconha, coca, ópio, metan)" },
+      { name: "🧪 Laboratório", value: "`!construir_lab` (R$ 25k) · `!up_lab` · `!lab` (status)" },
+      { name: "🌱 Plantio", value: "`!plantar_d <droga>` · `!plantios_d` · `!colher_d <id>` (rola batida policial!)" },
+      { name: "⚗️ Processar", value: "`!processar <droga> [qtd]` · `!estoque_d` (estoque ilegal)" },
+      { name: "🤝 Vender", value: "`!traficar @user <prodKey> <qtd> [preço]` (8% chance de delação)" },
+      { name: "💊 Consumo & vício", value: "`!consumir_d <prodKey>` (efeito + vício) · `!desintoxicar` (clínica)" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "💼 15. SALAFRÁRIO — Golpes & Pirâmides",
+    0x8b4513,
+    "Phishing, estelionato, produto falso e a clássica pirâmide financeira.",
+    [
+      { name: "💼 Golpes pontuais", value: "`!golpes` (catálogo) · `!golpe phishing|estelionato|falsoproduto [@alvo]`" },
+      { name: "🏗️ Pirâmide financeira", value: "`!piramide criar <nome> <entrada>` · `!piramide entrar @dono` · `!piramide status [@dono]` · `!piramide encerrar` (dono some com o pote)" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "🤝 16. SALAFRÁRIO — Suborno, Chantagem & Sequestro",
+    0x550044,
+    "Corrompa autoridades, junte sujeira contra inimigos e mantenha reféns.",
+    [
+      { name: "🤝 Suborno", value: "`!subornar policia|juiz|fiscal|prefeito [valor]` · `!subornos` (histórico)" },
+      { name: "🤐 Chantagem", value: "`!fofoca @user` (cava sujeira, R$ 800) · `!chantagear @user <valor>` (extorque) · `!sigilo` (apaga sujeira contra você)" },
+      { name: "🪤 Sequestro", value: "`!sequestrar @user <resgate>` (precisa arma) · `!resgatar @vitima` · `!fugir_seq` (25%) · `!sequestros` (seus reféns)" },
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "📋 17. SALAFRÁRIO — Missões, Infâmia & Mercado P2P",
+    0xff8800,
+    "Tarefas diárias com recompensa, ranking dos maiores salafrários e mercado entre jogadores.",
+    [
+      { name: "📋 Missões diárias", value: "`!missoes` (4 sorteadas/dia) · `!resgatarmissao <key>`" },
+      { name: "🦝 Infâmia", value: "`!infamia [@user]` (8 títulos: Cidadão de Bem → Imperador do Crime) · `!topinfamia`" },
       { name: "🛒 Mercado P2P", value: "`!mercado` · `!ofertar <itemKey> <qtd> <preço>` · `!comprar_oferta <id>` · `!retirar_oferta <id>`" },
-      { name: "📋 Missões & Infâmia", value: "`!missoes` · `!resgatarmissao <key>` · `!infamia [@user]` · `!topinfamia`" },
-    );
-  return msg.reply({ embeds: [e1, e2, e3, e4, e5] }).catch(() => {});
+    ],
+  ));
+
+  pages.push(_helpPage(
+    "🧰 18. Outros (Lavagem, Imposto, Falência, Admin)",
+    0x95a5a6,
+    "Sistemas de apoio que mantêm o resto da economia rodando.",
+    [
+      { name: "🧼 Lavagem de dinheiro", value: "`!lavar <valor>`" },
+      { name: "🧾 Imposto de Renda", value: "`!ir` (status) · `!sonegar`" },
+      { name: "⚖️ Falência", value: "`!falir` · `!status` · `!checkfalencia`" },
+      { name: "🛠️ Admin", value: "`!adm dar|tirar|reset @user [v]`" },
+    ],
+  ));
+
+  return _paginateHelp(msg, pages);
 });
 
 // ============ DISPATCHER ============
