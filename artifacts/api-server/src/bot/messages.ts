@@ -85,6 +85,20 @@ function intArg(args: string[], idx: number): number | null {
   return Number.isFinite(v) && v > 0 ? v : null;
 }
 
+// Resolve alvo de comandos de visualização: se houver @menção, retorna esse jogador;
+// senão retorna o autor. Usado nos comandos read-only (!saldo, !inv, !ficha, etc).
+async function _target(msg: Message, args: string[]) {
+  const tid = getMentionId(msg, args, 0);
+  if (tid && tid !== msg.author.id) {
+    const u = msg.mentions.users.first();
+    const name = u?.username ?? "user";
+    const p = await getOrCreatePlayer(tid, name);
+    return { p, name: p.username ?? name, isOther: true, id: tid };
+  }
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  return { p, name: msg.author.username, isOther: false, id: msg.author.id };
+}
+
 // ============ HELPERS GLOBAIS ============
 // GIFs animados (URLs públicas Tenor — Discord renderiza no embed.setImage)
 export const GIFS: Record<string, string> = {
@@ -198,10 +212,10 @@ export function getSlots(p: any, kind: "planta" | "animal"): number {
 }
 
 // ============ ECONOMIA ============
-reg(["saldo", "bal"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+reg(["saldo", "bal"], async (msg, args) => {
+  const { p, name } = await _target(msg, args);
   const eco = await getEconomy();
-  const e = new EmbedBuilder().setTitle("💰 Carteira").setColor(0x00ff88).addFields(
+  const e = new EmbedBuilder().setTitle(`💰 Carteira — ${name}`).setColor(0x00ff88).addFields(
     { name: "💵 Em mãos", value: formatMoney(p.balance), inline: true },
     { name: "🏦 Banco", value: formatMoney(p.bankBalance), inline: true },
     { name: "📊 Inflação", value: `${((eco.inflation - 1) * 100).toFixed(1)}%`, inline: true },
@@ -232,10 +246,10 @@ reg(["sac", "sacar"], async (msg, args) => {
   return reply(msg, `✅ Sacou ${formatMoney(v)} (taxa ${formatMoney(tax)}) → recebeu ${formatMoney(net)}.`);
 });
 
-reg(["banco"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+reg(["banco"], async (msg, args) => {
+  const { p, name } = await _target(msg, args);
   const eco = await getEconomy();
-  const e = new EmbedBuilder().setTitle("🏦 Banco").setColor(0x0099ff).addFields(
+  const e = new EmbedBuilder().setTitle(`🏦 Banco — ${name}`).setColor(0x0099ff).addFields(
     { name: "💵 Em mãos", value: formatMoney(p.balance), inline: true },
     { name: "🏦 Banco", value: formatMoney(p.bankBalance), inline: true },
     { name: "💸 Taxa de saque", value: `${(eco.bankTaxRate * 100).toFixed(1)}%`, inline: true },
@@ -382,11 +396,11 @@ reg(["comprar"], async (msg, args) => {
   return reply(msg, `✅ Comprou ${qty}x ${item.emoji} ${item.name} por ${formatMoney(total)}.`);
 });
 
-reg(["inv", "mochila", "inventario"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+reg(["inv", "mochila", "inventario"], async (msg, args) => {
+  const { p, name } = await _target(msg, args);
   const inv = p.inventory ?? {};
-  const entries = Object.entries(inv).filter(([, q]) => (q as number) > 0);
-  const e = new EmbedBuilder().setTitle(`🎒 Mochila — ${msg.author.username}`).setColor(0x885500);
+  const entries = Object.entries(inv).filter(([k, q]) => (q as number) > 0 && !k.startsWith("_"));
+  const e = new EmbedBuilder().setTitle(`🎒 Mochila — ${name}`).setColor(0x885500);
   if (entries.length === 0) e.setDescription("Vazia. Use `!loja`.");
   else e.setDescription(entries.map(([k, q]) => {
     const it = (SHOP_ITEMS as any)[k];
@@ -581,9 +595,9 @@ reg(["roubar", "assaltar"], async (msg, args) => {
   return reply(msg, `💰 Roubou ${formatMoney(stolen)} de ${t.username}.`);
 });
 
-reg(["ficha"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
-  const e = new EmbedBuilder().setTitle(`🦹 Ficha — ${msg.author.username}`).setColor(0xff5555).addFields(
+reg(["ficha"], async (msg, args) => {
+  const { p, name } = await _target(msg, args);
+  const e = new EmbedBuilder().setTitle(`🦹 Ficha — ${name}`).setColor(0xff5555).addFields(
     { name: "Procurado", value: `${"⭐".repeat(Math.min(5, p.wantedLevel)) || "Limpo"}`, inline: true },
     { name: "Crimes", value: `${p.criminalRecord}`, inline: true },
     { name: "Preso", value: p.isJailed ? `Sim (${p.jailEnd ? formatCooldown(p.jailEnd.getTime() - Date.now()) : "?"})` : "Não", inline: true },
@@ -675,11 +689,11 @@ reg(["plantar"], async (msg, args) => {
   ], 700);
 });
 
-reg(["plant", "plantacao"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+reg(["plant", "plantacao"], async (msg, args) => {
+  const { p, name, isOther } = await _target(msg, args);
   const plots = await db.query.plots.findMany({ where: and(eq(schema.plots.ownerId, p.discordId), eq(schema.plots.harvested, false)) });
-  if (plots.length === 0) return reply(msg, "🌾 Nenhuma plantação ativa.");
-  const e = new EmbedBuilder().setTitle("🌾 Plantações").setColor(0x88cc44);
+  if (plots.length === 0) return reply(msg, isOther ? `🌾 ${name} não tem plantações ativas.` : "🌾 Nenhuma plantação ativa.");
+  const e = new EmbedBuilder().setTitle(`🌾 Plantações — ${name}`).setColor(0x88cc44);
   for (const pl of plots) {
     const crop = CROPS[pl.crop]!;
     const left = pl.readyAt.getTime() - Date.now();
@@ -967,9 +981,9 @@ reg(["gsair"], async (msg) => {
   return reply(msg, `🚪 Saiu da gangue.`);
 });
 
-reg(["ginfo"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
-  if (!p.gangId) return reply(msg, "❌ Sem gangue.");
+reg(["ginfo"], async (msg, args) => {
+  const { p, name, isOther } = await _target(msg, args);
+  if (!p.gangId) return reply(msg, isOther ? `❌ ${name} não está em nenhuma gangue.` : "❌ Sem gangue.");
   const g = await db.query.gangs.findFirst({ where: eq(schema.gangs.id, p.gangId) });
   if (!g) return reply(msg, "❌ Gangue não encontrada.");
   let warStatus = "🕊️ Não";
@@ -1200,15 +1214,16 @@ reg(["comprarauto"], async (msg, args) => {
   return reply(msg, `${m.emoji} Comprou **${m.name}** (#${car.id}) por ${formatMoney(m.price)}!`);
 });
 
-reg(["garagem"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+reg(["garagem"], async (msg, args) => {
+  const { p, name, isOther } = await _target(msg, args);
   const list = await db.query.cars.findMany({ where: eq(schema.cars.ownerId, p.discordId) });
-  if (list.length === 0) return reply(msg, "🚗 Garagem vazia. Veja `!autos`.");
-  const e = new EmbedBuilder().setTitle("🅿️ Garagem").setColor(0x666666);
+  if (list.length === 0) return reply(msg, isOther ? `🚗 ${name} não tem carros.` : "🚗 Garagem vazia. Veja `!autos`.");
+  const e = new EmbedBuilder().setTitle(`🅿️ Garagem — ${name}`).setColor(0x666666);
   for (const c of list) {
     const daysSince = (Date.now() - c.lastMaintenance.getTime()) / DAY_MS;
     const cond = Math.max(0, c.condition - Math.floor(daysSince * 5));
-    e.addFields({ name: `#${c.id} ${c.model}`, value: `Estado ${cond}% · Valor ${formatMoney(depreciate(c.currentValue, c.basePrice, cond))}\n\`!consertar ${c.id}\` · \`!vendercarro ${c.id}\``, inline: false });
+    const ctrls = isOther ? "" : `\n\`!consertar ${c.id}\` · \`!vendercarro ${c.id}\``;
+    e.addFields({ name: `#${c.id} ${c.model}`, value: `Estado ${cond}% · Valor ${formatMoney(depreciate(c.currentValue, c.basePrice, cond))}${ctrls}`, inline: false });
   }
   return reply(msg, { embeds: [e] });
 });
@@ -1254,10 +1269,11 @@ reg(["vendercarro"], async (msg, args) => {
 });
 
 // ============ CASA / TERRITÓRIO PESSOAL ============
-reg(["casa"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+reg(["casa"], async (msg, args) => {
+  const { p, name, isOther } = await _target(msg, args);
   const h = await db.query.houses.findFirst({ where: eq(schema.houses.ownerId, p.discordId) });
   if (!h) {
+    if (isOther) return reply(msg, `🏠 ${name} ainda não tem imóvel.`);
     const e = new EmbedBuilder().setTitle("🏠 Imobiliária").setColor(0x884422).setDescription("Você ainda não tem imóvel. Tipos disponíveis:");
     for (const t of Object.values(HOUSE_TYPES)) {
       e.addFields({ name: `${t.emoji} ${t.name}`, value: `${formatMoney(t.basePrice)} · Renda ${formatMoney(t.passiveIncome)}/h\n\`!casacomprar ${t.key}\``, inline: true });
@@ -1266,11 +1282,13 @@ reg(["casa"], async (msg) => {
   }
   const t = HOUSE_TYPES[h.type] ?? HOUSE_TYPES["barraco"]!;
   const ups = Object.entries(h.upgrades ?? {}).map(([k]) => HOUSE_UPGRADES[k]?.emoji ?? "").join(" ");
-  const e = new EmbedBuilder().setTitle(`${t.emoji} ${t.name} (Nível ${h.level})`).setColor(0x884422).addFields(
+  const fields: { name: string; value: string; inline: boolean }[] = [
+    { name: "Dono", value: `<@${p.discordId}>`, inline: true },
     { name: "Valor", value: formatMoney(h.baseValue), inline: true },
     { name: "Upgrades", value: ups || "Nenhum", inline: true },
-    { name: "Coletar renda", value: "`!coletar`", inline: true },
-  );
+  ];
+  if (!isOther) fields.push({ name: "Coletar renda", value: "`!coletar`", inline: true });
+  const e = new EmbedBuilder().setTitle(`${t.emoji} ${t.name} (Nível ${h.level})`).setColor(0x884422).addFields(...fields);
   return reply(msg, { embeds: [e] });
 });
 
@@ -1317,19 +1335,20 @@ reg(["coletar"], async (msg) => {
 });
 
 // ============ FAZENDA ANIMAL ============
-reg(["fazenda"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+reg(["fazenda"], async (msg, args) => {
+  const { p, name, isOther } = await _target(msg, args);
   const list = await db.query.farmAnimals.findMany({ where: and(eq(schema.farmAnimals.ownerId, p.discordId), eq(schema.farmAnimals.alive, true)) });
-  const e = new EmbedBuilder().setTitle("🚜 Fazenda").setColor(0x88aa44);
-  if (list.length === 0) e.setDescription("Vazia. Compre animais com `!animal <espécie> [nome]`.");
+  const e = new EmbedBuilder().setTitle(`🚜 Fazenda — ${name}`).setColor(0x88aa44);
+  if (list.length === 0) e.setDescription(isOther ? `${name} não tem animais vivos.` : "Vazia. Compre animais com `!animal <espécie> [nome]`.");
   else for (const a of list) {
     const sp = ANIMAL_SPECIES[a.species]!;
     const hoursSince = (Date.now() - a.lastFed.getTime()) / (60 * 60 * 1000);
     const hunger = Math.max(0, a.hunger - Math.floor(hoursSince * HUNGER_DECAY_PER_HOUR));
     const ready = a.readyAt && Date.now() >= a.readyAt.getTime();
-    e.addFields({ name: `#${a.id} ${sp.emoji} ${a.name ?? sp.name}`, value: `Fome ${hunger}/100${ready ? " · ✅ pronto" : ""}\n\`!alimentar ${a.id}\` · \`!abater ${a.id}\``, inline: false });
+    const ctrls = isOther ? "" : `\n\`!alimentar ${a.id}\` · \`!abater ${a.id}\``;
+    e.addFields({ name: `#${a.id} ${sp.emoji} ${a.name ?? sp.name}`, value: `Fome ${hunger}/100${ready ? " · ✅ pronto" : ""}${ctrls}`, inline: false });
   }
-  e.addFields({ name: "Espécies", value: Object.values(ANIMAL_SPECIES).map(s => `${s.emoji} ${s.key} ${formatMoney(s.buyPrice)}`).join("\n"), inline: false });
+  if (!isOther) e.addFields({ name: "Espécies", value: Object.values(ANIMAL_SPECIES).map(s => `${s.emoji} ${s.key} ${formatMoney(s.buyPrice)}`).join("\n"), inline: false });
   return reply(msg, { embeds: [e] });
 });
 
@@ -1395,10 +1414,11 @@ reg(["pet"], async (msg, args) => {
   return reply(msg, `🐾 Adotou ${sp} chamado **${nome}**! Use \`!petfeed\` antes que morra.`);
 });
 
-reg(["pets"], async (msg) => {
-  const list = await db.query.pets.findMany({ where: eq(schema.pets.ownerId, msg.author.id) });
-  if (list.length === 0) return reply(msg, "🐾 Sem pets.");
-  return reply(msg, list.map(p => {
+reg(["pets"], async (msg, args) => {
+  const { name, isOther, id } = await _target(msg, args);
+  const list = await db.query.pets.findMany({ where: eq(schema.pets.ownerId, id) });
+  if (list.length === 0) return reply(msg, isOther ? `🐾 ${name} não tem pets.` : "🐾 Sem pets.");
+  return reply(msg, `🐾 **Pets de ${name}**\n` + list.map(p => {
     const hours = (Date.now() - p.lastFed.getTime()) / (60 * 60 * 1000);
     const hunger = Math.max(0, p.hunger - Math.floor(hours * 5));
     return `#${p.id} **${p.name}** (${p.species}) — ${p.alive ? `Fome ${hunger}` : "💀 morto"}`;
@@ -1596,15 +1616,16 @@ reg(["bvender"], async (msg, args) => {
   return reply(msg, `📉 Vendeu ${qty} ações de ${sym} por ${formatMoney(total)}.`);
 });
 
-reg(["carteira"], async (msg) => {
-  const hs = await db.query.stockPortfolios.findMany({ where: eq(schema.stockPortfolios.playerId, msg.author.id) });
-  if (hs.length === 0) return reply(msg, "💼 Carteira vazia.");
+reg(["carteira"], async (msg, args) => {
+  const { name, isOther, id } = await _target(msg, args);
+  const hs = await db.query.stockPortfolios.findMany({ where: eq(schema.stockPortfolios.playerId, id) });
+  if (hs.length === 0) return reply(msg, isOther ? `💼 ${name} não tem ações.` : "💼 Carteira vazia.");
   const lines: string[] = [];
   for (const h of hs) {
     const c = await db.query.companies.findFirst({ where: eq(schema.companies.id, h.companyId) });
     if (c) lines.push(`${c.stockSymbol ?? c.name} — ${h.shares} ações · ${formatMoney(c.sharePrice * h.shares)}`);
   }
-  return reply(msg, lines.join("\n"));
+  return reply(msg, `💼 **Carteira de ${name}**\n${lines.join("\n")}`);
 });
 
 // ============ DÍVIDAS / FIADO ============
@@ -1651,12 +1672,12 @@ reg(["falir", "falencia"], async (msg) => {
   return reply(msg, `⚖️ **FALÊNCIA DECRETADA**\nVocê perdeu casa, carros e teve dívidas perdoadas.\n📉 -200 reputação · -30 karma\n🔒 Sem crédito por 7 dias.`);
 });
 
-reg(["status", "patrimonio"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
-  const ds = await listDebts(msg.author.id);
+reg(["status", "patrimonio"], async (msg, args) => {
+  const { p, name, id } = await _target(msg, args);
+  const ds = await listDebts(id);
   const totalDebt = ds.reduce((s, d) => s + d.remainingAmount, 0);
   const wealth = p.balance + p.bankBalance;
-  const e = new EmbedBuilder().setTitle(`📊 Patrimônio · ${p.username}`).setColor(p.bankrupt ? 0xff0000 : 0x00ff88).addFields(
+  const e = new EmbedBuilder().setTitle(`📊 Patrimônio · ${name}`).setColor(p.bankrupt ? 0xff0000 : 0x00ff88).addFields(
     { name: "💵 Carteira", value: formatMoney(p.balance), inline: true },
     { name: "🏦 Banco", value: formatMoney(p.bankBalance), inline: true },
     { name: "📜 Dívidas", value: formatMoney(totalDebt), inline: true },
@@ -2245,10 +2266,11 @@ function getMaterias(p: any): Record<string, number> { return { ...((p.inventory
 function getEstoque(p: any): Record<string, number> { return { ...((p.inventory?._estoque as Record<string, number>) ?? {}) }; }
 function getFabrica(p: any): { nivel: number; ramo: string } | null { return (p.inventory?._fabrica as any) ?? null; }
 
-reg(["empresa", "minhaempresa"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+reg(["empresa", "minhaempresa"], async (msg, args) => {
+  const { p, name, isOther } = await _target(msg, args);
   const c = await db.query.companies.findFirst({ where: eq(schema.companies.ownerId, p.discordId) });
   if (!c) {
+    if (isOther) return reply(msg, `🏢 ${name} não tem empresa.`);
     if (!isEmpresario(p)) return reply(msg, "❌ Apenas formados em **Empresário** podem ter empresa. Use `!curso empresario` e `!treinar`.");
     return reply(msg, `🏢 Você ainda não tem empresa. Use \`!ecriar "<nome>" <ramo>\`.\nVeja os ramos disponíveis com \`!ramos\`.\nCusto: ${formatMoney(COMPANY_CREATE_COST)}`);
   }
@@ -3185,10 +3207,10 @@ reg(["plantar_d", "plantard", "plantardroga"], async (msg, args) => {
   return reply(msg, `${def.emoji} Plantou **${def.name}** \`#${id}\` por ${formatMoney(cost)}. Pronta em ${def.growMinutes} min. Cuidado com a polícia.`);
 });
 
-reg(["plantios_d", "plantiosd", "minhasplantas"], async (msg) => {
-  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+reg(["plantios_d", "plantiosd", "minhasplantas"], async (msg, args) => {
+  const { p, name, isOther } = await _target(msg, args);
   const plantios = _plantios(p);
-  if (plantios.length === 0) return reply(msg, "🌱 Sem plantios ilegais. Inicie com `!plantar_d <droga>`.");
+  if (plantios.length === 0) return reply(msg, isOther ? `🌱 ${name} não tem plantios ilegais.` : "🌱 Sem plantios ilegais. Inicie com `!plantar_d <droga>`.");
   const lines = plantios.map(x => {
     const def = DROGAS[x.droga]!;
     const ms = _now() - x.plantedAt;
