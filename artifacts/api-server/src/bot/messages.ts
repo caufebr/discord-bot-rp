@@ -3322,6 +3322,76 @@ reg(["estoque_d", "estoqued", "narcoestoque"], async (msg) => {
   return reply(msg, { embeds: [new EmbedBuilder().setTitle("📦 Estoque ilegal").setColor(0x442244).setDescription(lines.join("\n"))] });
 });
 
+// ============ TABELA FIXA NPC (Boca de fumo) ============
+// Cada produto tem preço unitário fixo (sem inflação), cap de unidades vendidas por dia
+// e chance de denúncia por transação. Atualize aqui pra balancear progressão.
+const NPC_DRUG_PRICES: Record<string, { unit: number; risk: number; cap: number }> = {
+  maconha_pronta: { unit:  250, risk: 0.04, cap: 50 },
+  po:             { unit: 1300, risk: 0.10, cap: 30 },
+  her:            { unit: 4500, risk: 0.18, cap: 20 },
+  meth:           { unit: 9000, risk: 0.25, cap: 15 },
+};
+
+reg(["precos_d", "precosd", "tabela_d", "boca_precos"], async (msg) => {
+  const e = new EmbedBuilder().setTitle("📊 Tabela da Boca (NPC)").setColor(0x444466)
+    .setDescription("Preços fixos pagos pela boca de fumo (NPC). Venda sem depender de jogador real.\nUso: `!vender_npc <produto> [qtd]` (ex: `!vender_npc po 10`).");
+  for (const [k, tab] of Object.entries(NPC_DRUG_PRICES)) {
+    const def = Object.values(DROGAS).find(d => d.processedKey === k);
+    if (!def) continue;
+    const dia = tab.unit * tab.cap;
+    e.addFields({
+      name: `${def.emoji} ${def.processedName} (\`${k}\`)`,
+      value: `💵 **${formatMoney(tab.unit)}/un** · 📦 cap **${tab.cap}/dia** (até ${formatMoney(dia)}) · 🚔 ${(tab.risk * 100).toFixed(0)}% denúncia`,
+      inline: false,
+    });
+  }
+  e.setFooter({ text: "P2P (!traficar) tende a render mais por unidade, mas exige comprador real e 8% de delação." });
+  return reply(msg, { embeds: [e] });
+});
+
+reg(["vender_npc", "vendernpc", "boca", "ponto"], async (msg, args) => {
+  const dk = args[0]?.toLowerCase();
+  const qtdPedida = Math.max(1, intArg(args, 1) ?? 1);
+  if (!dk || !NPC_DRUG_PRICES[dk]) return reply(msg, "❌ Uso: `!vender_npc <produto> [qtd]` — veja `!precos_d`.");
+  const tab = NPC_DRUG_PRICES[dk]!;
+  const def = Object.values(DROGAS).find(d => d.processedKey === dk)!;
+  const p = await getOrCreatePlayer(msg.author.id, msg.author.username);
+  if (isJailed(p)) return reply(msg, "❌ Você está preso!");
+  const drogas = _drogasInv(p);
+  if ((drogas[dk] ?? 0) < 1) return reply(msg, `❌ Você não tem **${def.processedName}** em estoque.`);
+
+  const inv = _inv(p);
+  const today = new Date().toISOString().slice(0, 10);
+  const sold = ((inv._npc_sold as Record<string, { day: string; qty: number }>) ?? {});
+  const curr = sold[dk]?.day === today ? sold[dk].qty : 0;
+  const restCap = Math.max(0, tab.cap - curr);
+  if (restCap <= 0) return reply(msg, `📵 A boca já comprou ${tab.cap}× **${def.processedName}** hoje. Volte amanhã ou tente \`!traficar @user\`.`);
+
+  const venderQtd = Math.min(qtdPedida, restCap, drogas[dk] ?? 0);
+  const total = venderQtd * tab.unit;
+
+  // Cada transação tem risco independente de denúncia
+  const denuncia = Math.random() < tab.risk;
+
+  drogas[dk] = (drogas[dk] ?? 0) - venderQtd;
+  sold[dk] = { day: today, qty: curr + venderQtd };
+  inv._drogas = drogas;
+  inv._npc_sold = sold;
+  bumpInf(inv, "traficos");
+  bumpMissionProgress(inv, "traficar");
+
+  const updates: any = { inventory: inv };
+  if (denuncia) updates.wantedLevel = p.wantedLevel + 1;
+  await updatePlayer(p.discordId, updates);
+  await addMoney(p.discordId, total);
+  await logTransaction("NPC", p.discordId, total, "drug_npc", `${venderQtd}× ${def.processedName}`);
+
+  const partes = [`🤝 Vendeu **${venderQtd}× ${def.processedName}** na boca por ${formatMoney(total)} (cap restante hoje: ${tab.cap - (curr + venderQtd)}).`];
+  if (venderQtd < qtdPedida) partes.push(`⚠️ Limite diário cortou: vendeu ${venderQtd} de ${qtdPedida} pedido(s).`);
+  if (denuncia) partes.push("🚨 **DELAÇÃO!** +1 ⭐ procurado.");
+  return reply(msg, partes.join("\n"));
+});
+
 reg(["traficar", "vender_d"], async (msg, args) => {
   const tid = getMentionId(msg, args, 0);
   const dk = args[1]?.toLowerCase();
@@ -4201,7 +4271,8 @@ reg(["ajuda", "help", "comandos"], async (msg) => {
       { name: "🧪 Laboratório", value: "`!construir_lab` (R$ 25k) · `!up_lab` · `!lab` (status)" },
       { name: "🌱 Plantio", value: "`!plantar_d <droga>` · `!plantios_d` · `!colher_d <id>` (rola batida policial!)" },
       { name: "⚗️ Processar", value: "`!processar <droga> [qtd]` · `!estoque_d` (estoque ilegal)" },
-      { name: "🤝 Vender", value: "`!traficar @user <prodKey> <qtd> [preço]` (8% chance de delação)" },
+      { name: "🤝 Vender (P2P)", value: "`!traficar @user <prodKey> <qtd> [preço]` (8% chance de delação)" },
+      { name: "🏪 Vender (NPC – boca)", value: "`!precos_d` (tabela fixa) · `!vender_npc <prodKey> [qtd]` (sem precisar de comprador, com cap diário e risco de denúncia)" },
       { name: "💊 Consumo & vício", value: "`!consumir_d <prodKey>` (efeito + vício) · `!desintoxicar` (clínica)" },
     ],
   ));
